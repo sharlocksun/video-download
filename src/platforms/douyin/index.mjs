@@ -14,8 +14,8 @@ import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline/promises';
 import crypto from 'node:crypto';
-import os from 'node:os';
 import path from 'node:path';
+import { makeTempDir } from '../../core/temp-dir.mjs';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -829,10 +829,7 @@ async function stopBrowser(proc) {
 
 async function createDouyinSession(browserPath, options = {}) {
   const port = await getFreePort();
-  const profileDir = path.join(
-    os.tmpdir(),
-    `douyin-downloader-batch-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
+  const profileDir = await makeTempDir('douyin-downloader-batch');
   const proc = await startBrowser(browserPath, port, profileDir, true);
   const page = await waitForPage(port, options.timeoutMs || DEFAULT_TIMEOUT_MS);
   await cdp(page.webSocketDebuggerUrl, 'Page.addScriptToEvaluateOnNewDocument', {
@@ -988,10 +985,7 @@ async function downloadOne(url, options, browserPath) {
   const expectedId = extractDouyinId(pageUrl);
   const session = options.douyinSession || null;
   const port = session ? session.port : await getFreePort();
-  const profileDir = session ? session.profileDir : path.join(
-    os.tmpdir(),
-    `douyin-downloader-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
+  const profileDir = session ? session.profileDir : await makeTempDir('douyin-downloader');
   let proc = null;
   let page = session?.page || null;
 

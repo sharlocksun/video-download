@@ -2,9 +2,9 @@ import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { access, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { once } from 'node:events';
-import os from 'node:os';
 import path from 'node:path';
 import { resolveBaseDir } from '../../core/filename.mjs';
+import { makeTempDir } from '../../core/temp-dir.mjs';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const API_HEADERS = {
@@ -501,8 +501,7 @@ async function downloadDash(info, outputPath, options = {}) {
     throw new Error('当前清晰度需要合并 DASH 音视频，但没有找到 ffmpeg。请安装 ffmpeg，或先选择 720P/更低画质。');
   }
 
-  const tempDir = path.join(os.tmpdir(), `muxin-bilibili-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  await mkdir(tempDir, { recursive: true });
+  const tempDir = await makeTempDir('muxin-bilibili');
   const videoPath = path.join(tempDir, 'video.m4s');
   const audioPath = path.join(tempDir, 'audio.m4s');
   try {

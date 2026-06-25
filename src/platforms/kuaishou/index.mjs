@@ -1,9 +1,9 @@
 import { createWriteStream } from 'node:fs';
 import { access, mkdir, rm, stat } from 'node:fs/promises';
 import { once } from 'node:events';
-import os from 'node:os';
 import path from 'node:path';
 import { cdp, cookiesToHeader, getAllCookies, startCdpBrowser } from '../../core/cdp-browser.mjs';
+import { makeTempDir } from '../../core/temp-dir.mjs';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
@@ -239,10 +239,7 @@ async function downloadToFile(info, outputPath, cookies, options = {}) {
 }
 
 async function createKuaishouSession(browserPath, options = {}) {
-  const profileDir = path.join(
-    os.tmpdir(),
-    `muxin-kuaishou-batch-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
+  const profileDir = await makeTempDir('muxin-kuaishou-batch');
   const browser = await startCdpBrowser(browserPath, {
     url: 'about:blank',
     profileDir,
@@ -296,10 +293,7 @@ async function downloadOne(url, options = {}, browserPath) {
   }
 
   const session = options.kuaishouSession || null;
-  const profileDir = session ? session.profileDir : path.join(
-    os.tmpdir(),
-    `muxin-kuaishou-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
+  const profileDir = session ? session.profileDir : await makeTempDir('muxin-kuaishou');
   let browser = session || null;
   reportLog(options, `Opening: ${url}`);
 

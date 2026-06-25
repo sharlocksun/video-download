@@ -2,17 +2,22 @@ import { spawn } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { access, mkdir, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { uiHtml } from './ui-html.mjs';
 import { downloadVideo } from '../core/platform-runner.mjs';
 import { normalizeNameTemplateForBatch, resolveBaseDir, resolveOutDir } from '../core/filename.mjs';
 import { cdp, cookiesToHeader, getAllCookies, getCookiesForUrls, startCdpBrowser, waitForPage } from '../core/cdp-browser.mjs';
+import { makeTempDir, removeTempDir } from '../core/temp-dir.mjs';
 import { findBrowser } from '../platforms/index.mjs';
 import { getVideoInfo as getBilibiliVideoInfo } from '../platforms/bilibili/index.mjs';
 import { closeDouyinSession, createDouyinSession } from '../platforms/douyin/index.mjs';
 import { closeKuaishouSession, createKuaishouSession } from '../platforms/kuaishou/index.mjs';
 import { findYtDlp } from '../platforms/youtube/index.mjs';
+import { chatWithAi, testAiConfig } from '../ai/client.mjs';
+import { loadAiConfig, publicAiConfig, saveAiConfig } from '../ai/config.mjs';
+import { analyzeTranscriptLocal } from '../ai/local-analysis.mjs';
+import { buildSystemPrompt, buildTranscriptContext, quickAction } from '../ai/prompts.mjs';
+import { extractSubtitlesFromUrl } from '../ai/subtitles.mjs';
 
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
@@ -207,10 +212,7 @@ async function verifyBilibiliCookie(cookieHeader) {
 }
 
 async function openUiBrowser(browserPath, uiUrl) {
-  const profileDir = path.join(
-    os.tmpdir(),
-    `muxin-video-downloader-ui-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
+  const profileDir = await makeTempDir('muxin-video-downloader-ui');
   const args = [
     `--user-data-dir=${profileDir}`,
     '--no-first-run',
@@ -296,6 +298,7 @@ async function runUiSession() {
   let hadUiClient = false;
   let shutdownTimer = null;
   let shuttingDown = false;
+  let uiBrowser = null;
   const shutdownServer = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -319,6 +322,14 @@ async function runUiSession() {
       await closeKuaishouSession(activeKuaishouSession).catch(() => {});
       activeKuaishouSession = null;
     }
+    if (uiBrowser?.proc && !uiBrowser.proc.killed && uiBrowser.proc.exitCode === null) {
+      uiBrowser.proc.kill();
+      await Promise.race([
+        once(uiBrowser.proc, 'exit'),
+        sleep(2000),
+      ]).catch(() => {});
+    }
+    await removeTempDir(uiBrowser?.profileDir);
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 1500).unref();
   };
@@ -792,6 +803,69 @@ async function runUiSession() {
         });
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/api/ai/config') {
+        const config = await loadAiConfig();
+        sendJson(res, 200, { ok: true, config: publicAiConfig(config) });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/ai/config') {
+        const body = await readJsonBody(req);
+        const config = await saveAiConfig(body);
+        sendJson(res, 200, { ok: true, config: publicAiConfig(config) });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/ai/test') {
+        const body = await readJsonBody(req);
+        const config = await saveAiConfig(body);
+        const message = await testAiConfig(config);
+        sendJson(res, 200, { ok: true, message, config: publicAiConfig(config) });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/ai/local-analyze') {
+        const body = await readJsonBody(req);
+        const transcript = String(body.transcript || '').trim();
+        if (!transcript) {
+          sendJson(res, 400, { ok: false, error: '请先粘贴字幕、转写稿或视频内容文本。' });
+          return;
+        }
+        const analysis = analyzeTranscriptLocal(transcript, String(body.platform || 'general'));
+        sendJson(res, 200, { ok: true, analysis });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/ai/extract-subtitles') {
+        const body = await readJsonBody(req);
+        const videoUrl = String(body.url || '').trim();
+        const ytDlpPath = await findYtDlp(body.ytDlpPath ? String(body.ytDlpPath) : defaultToolPaths.ytDlpPath);
+        const subtitles = await extractSubtitlesFromUrl(videoUrl, ytDlpPath);
+        sendJson(res, 200, { ok: true, subtitles });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/ai/chat') {
+        const body = await readJsonBody(req);
+        const config = await loadAiConfig();
+        const platform = String(body.platform || 'general');
+        const transcript = String(body.transcript || '');
+        const sourceUrl = String(body.sourceUrl || '');
+        const history = Array.isArray(body.messages) ? body.messages : [];
+        const action = quickAction(String(body.action || ''));
+        const prompt = action?.prompt || String(body.prompt || '').trim();
+        if (!prompt && !history.length) {
+          sendJson(res, 400, { ok: false, error: '请输入想问 AI 的问题，或点击一个二创快捷按钮。' });
+          return;
+        }
+        const messages = [
+          { role: 'system', content: buildSystemPrompt(platform) },
+          { role: 'user', content: buildTranscriptContext(transcript, sourceUrl) },
+          ...history.map((item) => ({
+            role: item?.role === 'assistant' ? 'assistant' : 'user',
+            content: String(item?.content || ''),
+          })),
+        ];
+        if (prompt) messages.push({ role: 'user', content: prompt });
+        const answer = await chatWithAi(config, messages);
+        sendJson(res, 200, { ok: true, answer });
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/api/bilibili/login') {
         await closeBilibiliLoginBrowser();
         bilibiliLogin.cookieHeader = '';
@@ -1013,7 +1087,7 @@ async function runUiSession() {
   const uiUrl = `http://127.0.0.1:${port}/`;
   console.log(`UI: ${uiUrl}`);
 
-  await openUiBrowser(browserPath, uiUrl);
+  uiBrowser = await openUiBrowser(browserPath, uiUrl);
 }
 
 export { runUiSession };

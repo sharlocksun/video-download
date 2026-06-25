@@ -78,6 +78,23 @@ function uiHtml(defaults = {}) {
     .progress { width: 0%; height: 100%; background: linear-gradient(90deg, var(--green), var(--red)); transition: width .2s ease; }
     .log { height: 470px; overflow: auto; border-radius: 8px; border: 1px solid #d7ddcc; background: #172019; color: #eef8e8; padding: 14px; font-family: Consolas, "Microsoft YaHei", monospace; font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
     .hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 10px 0 0; }
+    .ai-panel { margin-top: 18px; }
+    .ai-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .ai-head h2 { margin: 0; }
+    .ai-settings { border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: #fffefa; margin-bottom: 14px; }
+    .ai-settings[hidden] { display: none; }
+    .ai-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .ai-workspace { display: grid; grid-template-columns: minmax(320px, 430px) 1fr; gap: 14px; align-items: start; }
+    .quick-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 12px; }
+    .quick-actions button { height: 34px; padding: 0 12px; font-size: 13px; }
+    .chat-window { height: 360px; overflow: auto; border: 1px solid #d7ddcc; border-radius: 8px; background: #fffefa; padding: 12px; }
+    .message { margin: 0 0 10px; padding: 10px 12px; border-radius: 8px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .message.assistant { background: #eef4e8; border: 1px solid #d3dfc8; }
+    .message.user { background: #f3eadb; border: 1px solid #e0d1b8; }
+    .message.system { color: var(--muted); border: 1px dashed var(--line); background: transparent; }
+    .chat-row { display: grid; grid-template-columns: 1fr 96px; gap: 10px; margin-top: 10px; align-items: end; }
+    .chat-row textarea { min-height: 72px; }
+    .ai-status { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 8px; }
     @media (max-width: 880px) {
       .app { padding: 18px; }
       header { grid-template-columns: 90px 1fr; gap: 14px; }
@@ -85,7 +102,7 @@ function uiHtml(defaults = {}) {
       h1 { font-size: 25px; }
       .layout { grid-template-columns: 1fr; }
       .status { grid-template-columns: 1fr; }
-      .row, .login-row, .auth-grid { grid-template-columns: 1fr; }
+      .row, .login-row, .auth-grid, .ai-grid, .ai-workspace, .chat-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -208,6 +225,92 @@ function uiHtml(defaults = {}) {
         <div class="log" id="log"></div>
       </section>
     </section>
+    <section class="panel ai-panel">
+      <div class="ai-head">
+        <h2>视频分析助手</h2>
+        <button class="secondary" type="button" id="ai-settings-toggle">AI 设置</button>
+      </div>
+      <p class="hint">本地分析不需要 API；智能总结、二创文案和实时对话需要先配置模型接口。平台侧重点会随目标平台自动调整。</p>
+      <div class="ai-settings" id="ai-settings" hidden>
+        <div class="ai-grid">
+          <div>
+            <label for="aiProvider">接口类型</label>
+            <select id="aiProvider">
+              <option value="openai-compatible">OpenAI 兼容 / 中转站</option>
+              <option value="gemini">Gemini</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </div>
+          <div>
+            <label for="aiModel">模型名称</label>
+            <input id="aiModel" placeholder="例如 gpt-4.1-mini、deepseek-chat、gemini-1.5-pro">
+          </div>
+          <div>
+            <label for="aiBaseUrl">API 地址</label>
+            <input id="aiBaseUrl" placeholder="例如 https://api.example.com/v1">
+          </div>
+          <div>
+            <label for="aiApiKey">API Key</label>
+            <input id="aiApiKey" type="password" autocomplete="off" placeholder="留空保存时会沿用已保存密钥">
+          </div>
+          <div>
+            <label for="aiTemperature">创造性</label>
+            <input id="aiTemperature" type="number" min="0" max="2" step="0.1" value="0.6">
+          </div>
+          <div>
+            <label for="aiMaxTokens">最大输出</label>
+            <input id="aiMaxTokens" type="number" min="256" max="8000" step="128" value="1800">
+          </div>
+        </div>
+        <div class="actions">
+          <button class="primary" type="button" id="ai-save">保存配置</button>
+          <button class="secondary" type="button" id="ai-test">测试连接</button>
+        </div>
+        <div class="ai-status" id="ai-config-status"></div>
+      </div>
+      <div class="ai-workspace">
+        <div>
+          <label for="aiPlatform">二创目标平台</label>
+          <select id="aiPlatform">
+            <option value="general">通用分析</option>
+            <option value="douyin">抖音</option>
+            <option value="bilibili">Bilibili</option>
+            <option value="youtube">YouTube</option>
+            <option value="xiaohongshu">小红书</option>
+            <option value="kuaishou">快手</option>
+          </select>
+          <label for="aiSourceUrl">参考视频链接</label>
+          <input id="aiSourceUrl" placeholder="可粘贴下载链接，方便 AI 对应上下文">
+          <label for="transcript">字幕 / 转写稿 / 视频内容</label>
+          <textarea id="transcript" placeholder="把字幕、转写稿或自己整理的视频内容粘贴到这里。"></textarea>
+          <div class="actions">
+            <button class="secondary" type="button" id="ai-extract-subtitles">提取字幕</button>
+            <button class="secondary" type="button" id="ai-local-analyze">本地分析</button>
+            <button class="secondary" type="button" id="ai-clean-transcript">清理字幕</button>
+          </div>
+        </div>
+        <div>
+          <div class="quick-actions" id="ai-quick-actions">
+            <button class="secondary" type="button" data-action="summary">总结全文</button>
+            <button class="secondary" type="button" data-action="outline">时间轴大纲</button>
+            <button class="secondary" type="button" data-action="quotes">提取金句</button>
+            <button class="secondary" type="button" data-action="douyin">抖音口播</button>
+            <button class="secondary" type="button" data-action="bilibili">B站标题简介</button>
+            <button class="secondary" type="button" data-action="youtube">YouTube/Shorts</button>
+            <button class="secondary" type="button" data-action="xiaohongshu">小红书笔记</button>
+            <button class="secondary" type="button" data-action="kuaishou">快手互动</button>
+          </div>
+          <div class="chat-window" id="ai-messages">
+            <div class="message system">先粘贴字幕或转写稿。没有 API 时可以点“本地分析”；配置 API 后可以直接追问、改写和生成平台化二创方案。</div>
+          </div>
+          <div class="chat-row">
+            <textarea id="aiPrompt" placeholder="输入想追问的问题，例如：帮我改成适合小红书的三段式笔记。"></textarea>
+            <button class="primary" type="button" id="ai-send">发送</button>
+          </div>
+          <div class="ai-status" id="ai-chat-status"></div>
+        </div>
+      </div>
+    </section>
   </main>
   <script>
     const logEl = document.getElementById('log');
@@ -228,6 +331,15 @@ function uiHtml(defaults = {}) {
     const youtubeAuthEl = document.getElementById('youtubeAuth');
     const youtubeLoginBrowserEl = document.getElementById('youtubeLoginBrowser');
     const cancelDownloadEl = document.getElementById('cancel-download');
+    const aiSettingsEl = document.getElementById('ai-settings');
+    const aiConfigStatusEl = document.getElementById('ai-config-status');
+    const aiChatStatusEl = document.getElementById('ai-chat-status');
+    const aiMessagesEl = document.getElementById('ai-messages');
+    const aiPromptEl = document.getElementById('aiPrompt');
+    const transcriptEl = document.getElementById('transcript');
+    const aiPlatformEl = document.getElementById('aiPlatform');
+    const aiSourceUrlEl = document.getElementById('aiSourceUrl');
+    const aiHistory = [];
     const state = { queued: 0, done: 0, failed: 0, running: false, stopping: false };
 
     function appendLog(text) {
@@ -256,6 +368,143 @@ function uiHtml(defaults = {}) {
       }
       if ([...qualityEl.options].some((item) => item.value === previous)) {
         qualityEl.value = previous;
+      }
+    }
+    function aiConfigPayload() {
+      return {
+        provider: document.getElementById('aiProvider').value,
+        baseUrl: document.getElementById('aiBaseUrl').value.trim(),
+        apiKey: document.getElementById('aiApiKey').value.trim(),
+        model: document.getElementById('aiModel').value.trim(),
+        temperature: Number(document.getElementById('aiTemperature').value) || 0.6,
+        maxTokens: Number(document.getElementById('aiMaxTokens').value) || 1800,
+      };
+    }
+    function applyAiConfig(config) {
+      if (!config) return;
+      document.getElementById('aiProvider').value = config.provider || 'openai-compatible';
+      document.getElementById('aiBaseUrl').value = config.baseUrl || '';
+      document.getElementById('aiModel').value = config.model || '';
+      document.getElementById('aiTemperature').value = config.temperature ?? 0.6;
+      document.getElementById('aiMaxTokens').value = config.maxTokens ?? 1800;
+      document.getElementById('aiApiKey').placeholder = config.hasApiKey ? '已保存密钥；留空则继续沿用' : '请输入 API Key';
+      aiConfigStatusEl.textContent = config.hasApiKey ? '已保存 API Key。' : '尚未保存 API Key；本地分析仍可使用。';
+    }
+    function appendAiMessage(role, text) {
+      const div = document.createElement('div');
+      div.className = 'message ' + role;
+      div.textContent = text;
+      aiMessagesEl.appendChild(div);
+      aiMessagesEl.scrollTop = aiMessagesEl.scrollHeight;
+    }
+    async function loadAiConfig() {
+      try {
+        const response = await fetch('/api/ai/config');
+        const result = await response.json();
+        if (result.ok) applyAiConfig(result.config);
+      } catch (error) {
+        aiConfigStatusEl.textContent = '读取 AI 配置失败：' + error.message;
+      }
+    }
+    async function runLocalAnalyze(updateTranscript) {
+      const transcript = transcriptEl.value.trim();
+      if (!transcript) {
+        aiChatStatusEl.textContent = '请先粘贴字幕、转写稿或视频内容。';
+        return;
+      }
+      aiChatStatusEl.textContent = '正在本地分析...';
+      try {
+        const response = await fetch('/api/ai/local-analyze', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            transcript,
+            platform: aiPlatformEl.value,
+          }),
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          aiChatStatusEl.textContent = '本地分析失败：' + result.error;
+          return;
+        }
+        if (updateTranscript) transcriptEl.value = result.analysis.cleaned || transcript;
+        appendAiMessage('assistant', updateTranscript ? '字幕已清理。' : result.analysis.result);
+        aiChatStatusEl.textContent = updateTranscript ? '字幕清理完成。' : '本地分析完成。';
+      } catch (error) {
+        aiChatStatusEl.textContent = '本地分析失败：' + error.message;
+      }
+    }
+    async function extractSubtitles() {
+      const sourceUrl = aiSourceUrlEl.value.trim() || urlsEl.value.split(/\\r?\\n/).map((item) => item.trim()).find(Boolean) || '';
+      if (!sourceUrl) {
+        aiChatStatusEl.textContent = '请先填写参考视频链接，或在下载链接框里保留一条链接。';
+        return;
+      }
+      aiSourceUrlEl.value = sourceUrl;
+      aiChatStatusEl.textContent = '正在提取平台字幕...';
+      try {
+        const response = await fetch('/api/ai/extract-subtitles', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            url: sourceUrl,
+            ytDlpPath: document.getElementById('ytDlpPath').value.trim(),
+          }),
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          aiChatStatusEl.textContent = '字幕提取失败：' + result.error;
+          appendAiMessage('system', '字幕提取失败：' + result.error);
+          return;
+        }
+        transcriptEl.value = result.subtitles.text || '';
+        appendAiMessage('assistant', '已提取字幕：' + result.subtitles.file + '\\n可用字幕文件：' + (result.subtitles.available || []).join('、'));
+        aiChatStatusEl.textContent = '字幕提取完成。';
+      } catch (error) {
+        aiChatStatusEl.textContent = '字幕提取失败：' + error.message;
+        appendAiMessage('system', '字幕提取失败：' + error.message);
+      }
+    }
+    async function sendAiPrompt(options = {}) {
+      const prompt = String(options.prompt || aiPromptEl.value || '').trim();
+      const action = String(options.action || '');
+      const userText = options.label || prompt;
+      if (!prompt && !action) {
+        aiChatStatusEl.textContent = '请输入问题，或点击一个快捷二创按钮。';
+        return;
+      }
+      appendAiMessage('user', userText);
+      aiChatStatusEl.textContent = 'AI 正在生成...';
+      document.getElementById('ai-send').disabled = true;
+      try {
+        const response = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            platform: aiPlatformEl.value,
+            sourceUrl: aiSourceUrlEl.value.trim(),
+            transcript: transcriptEl.value.trim(),
+            prompt,
+            action,
+            messages: aiHistory.slice(-10),
+          }),
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          appendAiMessage('system', 'AI 生成失败：' + result.error);
+          aiChatStatusEl.textContent = 'AI 生成失败。';
+          return;
+        }
+        appendAiMessage('assistant', result.answer);
+        aiHistory.push({ role: 'user', content: userText });
+        aiHistory.push({ role: 'assistant', content: result.answer });
+        aiPromptEl.value = '';
+        aiChatStatusEl.textContent = '生成完成。';
+      } catch (error) {
+        appendAiMessage('system', 'AI 生成失败：' + error.message);
+        aiChatStatusEl.textContent = 'AI 生成失败。';
+      } finally {
+        document.getElementById('ai-send').disabled = false;
       }
     }
     function updateBiliStatus(data) {
@@ -315,6 +564,9 @@ function uiHtml(defaults = {}) {
       youtubeAuthToolsEl.hidden = platform !== 'youtube';
       mergeToolsEl.hidden = platform !== 'bilibili' && platform !== 'youtube' && platform !== 'xiaohongshu';
       urlsEl.placeholder = platformPlaceholders[platform] || '请粘贴视频链接，每行一个';
+      if (aiPlatformEl && aiPlatformEl.querySelector('option[value="' + platform + '"]')) {
+        aiPlatformEl.value = platform;
+      }
     }
     function urlMatchesPlatform(url, platform) {
       let parsed;
@@ -425,6 +677,72 @@ function uiHtml(defaults = {}) {
       }
     });
     youtubeAuthEl.addEventListener('change', updateYoutubeAuthHint);
+    document.getElementById('ai-settings-toggle').addEventListener('click', () => {
+      aiSettingsEl.hidden = !aiSettingsEl.hidden;
+    });
+    document.getElementById('ai-save').addEventListener('click', async () => {
+      aiConfigStatusEl.textContent = '正在保存 AI 配置...';
+      try {
+        const response = await fetch('/api/ai/config', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(aiConfigPayload()),
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          aiConfigStatusEl.textContent = '保存失败：' + result.error;
+          return;
+        }
+        document.getElementById('aiApiKey').value = '';
+        applyAiConfig(result.config);
+        aiConfigStatusEl.textContent = 'AI 配置已保存。';
+      } catch (error) {
+        aiConfigStatusEl.textContent = '保存失败：' + error.message;
+      }
+    });
+    document.getElementById('ai-test').addEventListener('click', async () => {
+      aiConfigStatusEl.textContent = '正在测试连接...';
+      try {
+        const response = await fetch('/api/ai/test', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(aiConfigPayload()),
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          aiConfigStatusEl.textContent = '连接失败：' + result.error;
+          return;
+        }
+        document.getElementById('aiApiKey').value = '';
+        applyAiConfig(result.config);
+        aiConfigStatusEl.textContent = '连接成功：' + (result.message || '模型已响应');
+      } catch (error) {
+        aiConfigStatusEl.textContent = '连接失败：' + error.message;
+      }
+    });
+    document.getElementById('ai-local-analyze').addEventListener('click', () => runLocalAnalyze(false));
+    document.getElementById('ai-clean-transcript').addEventListener('click', () => runLocalAnalyze(true));
+    document.getElementById('ai-extract-subtitles').addEventListener('click', extractSubtitles);
+    document.getElementById('ai-send').addEventListener('click', () => sendAiPrompt());
+    aiPromptEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        sendAiPrompt();
+      }
+    });
+    document.getElementById('ai-quick-actions').addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      sendAiPrompt({
+        action: button.dataset.action,
+        label: button.textContent.trim(),
+      });
+    });
+    urlsEl.addEventListener('input', () => {
+      if (aiSourceUrlEl.value.trim()) return;
+      const firstUrl = urlsEl.value.split(/\\r?\\n/).map((item) => item.trim()).find(Boolean);
+      if (firstUrl) aiSourceUrlEl.value = firstUrl;
+    });
     document.getElementById('detect-quality').addEventListener('click', async () => {
       const platform = platformEl.value;
       const urls = document.getElementById('urls').value.split(/\\r?\\n/).map((url) => url.trim()).filter(Boolean);
@@ -558,6 +876,7 @@ function uiHtml(defaults = {}) {
 
     appendLog('界面已启动，可以粘贴链接开始下载。');
     updatePlatformVisibility();
+    loadAiConfig();
   </script>
 </body>
 </html>`;
