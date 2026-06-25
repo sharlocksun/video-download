@@ -1,0 +1,24 @@
+node_modules/
+build/
+
+# Local tools and downloaded media
+downloads/
+videos/
+test-videos/
+
+# Runtime browser profiles and cookies
+user-data/
+profiles/
+dist/profiles/
+dist/videos/
+*.cookies
+*cookies*.txt
+
+# Keep the packaged application, but ignore runtime files beside it
+!dist/
+!dist/muxin-video-downloader.exe
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.log
