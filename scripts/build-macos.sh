@@ -150,7 +150,7 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 # Automated smoke checks on the app and all bundled tools.
 file "$APP_BIN" "$RUNTIME/deno" "$RUNTIME/ffmpeg" "$RUNTIME/ffprobe" "$RUNTIME/whisper/engine-cpu/whisper-cli"
 for binary in "$APP_BIN" "$RUNTIME/deno" "$RUNTIME/ffmpeg" "$RUNTIME/ffprobe" "$RUNTIME/whisper/engine-cpu/whisper-cli"; do
-  lipo -verify_arch x86_64 arm64 "$binary"
+  lipo "$binary" -verify_arch x86_64 arm64
 done
 "$RUNTIME/yt-dlp" --version
 "$RUNTIME/deno" --version
