@@ -78,3 +78,52 @@ dist\muxin-video-downloader.exe
 ```text
 dist\muxin-video-downloader.exe
 ```
+
+## 客户安装包
+
+客户版支持 Windows 10/11 x64。安装后不需要客户预装 Node.js、Python、yt-dlp 或 FFmpeg。
+
+```powershell
+npm.cmd run build:installer
+```
+
+输出：
+
+```text
+release\木辛说视频下载器-Setup-x64.exe
+release\SHA256SUMS.json
+```
+
+安装包内置主程序、yt-dlp、精简 FFmpeg 和 Deno。客户数据与安装目录分离：
+
+- 配置、Cookie、登录资料和可选组件：`%LOCALAPPDATA%\MuxinVideoDownloader`
+- 默认下载视频：`%USERPROFILE%\Videos\木辛说视频下载器`
+- Whisper 引擎和模型：`%LOCALAPPDATA%\MuxinVideoDownloader\components\whisper`
+
+首次使用音频转文字时，在“环境与组件”中点击“一键安装 Whisper small”。程序优先尝试 Vulkan GPU 组件，失败后自动安装 CPU 版；已配置的旧 Python Whisper 仍可继续使用。
+
+环境诊断：
+
+```powershell
+木辛说视频下载器.exe --diagnose
+```
+
+AI Key 使用当前 Windows 用户的 DPAPI 加密保存。卸载程序默认保留下载视频，并允许用户选择是否清除配置、登录资料和 Whisper 模型。
+
+### 自动发布
+
+推送 `v*` 标签或手动运行 `.github/workflows/windows-release.yml`，可在 GitHub Actions 中构建安装包并上传到 GitHub Releases。首版未签名，客户应从官方 Releases 下载并核对 SHA-256。
+
+## macOS 安装包
+
+运行 `.github/workflows/macos-release.yml` 会在真实 macOS runner 上构建 universal DMG，同时支持 Intel 与 Apple Silicon：
+
+```bash
+npm ci
+npm run check:all
+npm run build:macos
+```
+
+产物为 `release/macos/木辛说视频下载器-macOS-universal.dmg`。应用内置 universal 版本的 Node SEA、yt-dlp、FFmpeg、FFprobe、Deno 和 whisper.cpp CPU 引擎；Whisper 模型仍由用户按需下载。配置与模型保存在 `~/Library/Application Support/MuxinVideoDownloader`，视频默认保存到 `~/Movies/木辛说视频下载器`。
+
+当前 macOS 包使用 ad-hoc 签名，尚未使用 Apple Developer ID 公证。首次打开时如被 Gatekeeper 拦截，可在 Finder 中右键应用并选择“打开”。

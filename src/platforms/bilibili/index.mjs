@@ -269,6 +269,8 @@ async function addFfmpegCandidatesFromInput(candidates, input) {
   candidates.push(
     path.join(value, 'ffmpeg.exe'),
     path.join(value, 'bin', 'ffmpeg.exe'),
+    path.join(value, 'ffmpeg'),
+    path.join(value, 'bin', 'ffmpeg'),
   );
 
   try {
@@ -276,6 +278,7 @@ async function addFfmpegCandidatesFromInput(candidates, input) {
     for (const entry of entries) {
       if (entry.isDirectory()) {
         candidates.push(path.join(value, entry.name, 'bin', 'ffmpeg.exe'));
+        candidates.push(path.join(value, entry.name, 'bin', 'ffmpeg'));
       }
     }
   } catch {}

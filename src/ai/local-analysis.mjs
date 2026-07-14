@@ -5,15 +5,44 @@ const STOP_WORDS = new Set([
 ]);
 
 function cleanTranscript(text = '') {
-  return String(text || '')
+  const seen = new Set();
+  const lines = String(text || '')
     .replace(/\r/g, '')
+    .replace(/\uFEFF/g, '')
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
+    .filter((line) => !/^(WEBVTT|NOTE|STYLE|Kind:|Language:)/i.test(line))
     .filter((line) => !/^\d+$/.test(line))
-    .filter((line) => !/^WEBVTT/i.test(line))
-    .map((line) => line.replace(/<[^>]+>/g, '').replace(/\s+/g, ' '))
-    .join('\n');
+    .filter((line) => !/^\[?(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?\]?$/.test(line))
+    .filter((line) => !/^(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?\s*-->\s*(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?/.test(line))
+    .map((line) => line
+      .replace(/^(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?\s*[-–—]\s*/, '')
+      .replace(/^\[?(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?\]?\s*/, '')
+      .replace(/<\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?>/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\{\\[^}]+}/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/^\s*[-–—•]\s*/, '')
+      .replace(/\[(?:music|applause|laughter|noise|silence)\]/ig, '')
+      .replace(/♪[^♪]*♪/g, '')
+      .replace(/\s+/g, ' ')
+      .trim())
+    .filter(Boolean)
+    .filter((line) => {
+      const key = line.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  return lines.join('\n')
+    .replace(/([，、：；])\n/g, '$1')
+    .replace(/([A-Za-z0-9])-\n([A-Za-z0-9])/g, '$1$2')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function splitSentences(text = '') {

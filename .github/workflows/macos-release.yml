@@ -1,0 +1,36 @@
+name: build-macos-release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/macos-release']
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: macos-13
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check:all
+      - run: npm run build:macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: muxin-macos-universal
+          if-no-files-found: error
+          path: |
+            release/macos/*.dmg
+            release/macos/SHA256SUMS.txt
+            build/macos/diagnose.json
+            build/macos/mounted-diagnose.json
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            release/macos/*.dmg
+            release/macos/SHA256SUMS.txt

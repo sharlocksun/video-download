@@ -2,6 +2,10 @@ import { runUiSession } from './app/ui-server.mjs';
 import { downloadVideo } from './core/platform-runner.mjs';
 import { closeDouyinSession, createDouyinSession } from './platforms/douyin/index.mjs';
 import { detectPlatform, findBrowser, getPlatform } from './platforms/index.mjs';
+import { diagnoseEnvironment } from './core/environment.mjs';
+import { findBundledTool } from './core/runtime-tools.mjs';
+import { findFfmpeg } from './platforms/bilibili/index.mjs';
+import { findYtDlp } from './platforms/youtube/index.mjs';
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 
@@ -23,13 +27,14 @@ Options:
   --overwrite                  覆盖同名文件
   --info                       只解析信息，不下载
   --quality <quality>          画质偏好：best、4k、2k、1080p60、1080p+、1080、720、540、480、360、lowest。默认：best
-  --platform <platform>        指定平台：douyin、bilibili、youtube、kuaishou、xiaohongshu
+  --platform <platform>        指定平台：douyin、bilibili、youtube、kuaishou、xiaohongshu、tiktok、instagram
   --bilibili-cookie <cookie>   使用你自己浏览器里的 Bilibili Cookie
   --ffmpeg <path>              ffmpeg 路径；可留空自动查找程序目录下的 downloads 文件夹
   --yt-dlp <path>              yt-dlp 路径；可留空自动查找程序目录或 downloads 文件夹
   --yt-dlp-cookies <path>      cookies.txt 路径；YouTube 登录验证时使用
   --yt-dlp-browser <browser>   从浏览器读取 Cookie：chrome、edge、firefox、brave
   --timeout <seconds>          页面/视频检测超时。默认：180
+  --diagnose                   输出环境诊断信息，不启动界面
   -h, --help                   显示帮助
 
 Examples:
@@ -55,6 +60,7 @@ function parseArgs(argv) {
     ytDlpCookiesPath: '',
     ytDlpCookiesFromBrowser: '',
     timeoutMs: DEFAULT_TIMEOUT_MS,
+    diagnose: false,
     urls: [],
   };
 
@@ -90,6 +96,8 @@ function parseArgs(argv) {
       options.ytDlpCookiesPath = String(argv[++i] || '');
     } else if (arg === '--yt-dlp-browser') {
       options.ytDlpCookiesFromBrowser = String(argv[++i] || '');
+    } else if (arg === '--diagnose') {
+      options.diagnose = true;
     } else if (arg === '--timeout') {
       const seconds = Number(argv[++i]);
       if (!Number.isFinite(seconds) || seconds <= 0) {
@@ -103,7 +111,7 @@ function parseArgs(argv) {
     }
   }
 
-  if (!options.help && options.urls.length === 0) {
+  if (!options.help && !options.diagnose && options.urls.length === 0) {
     throw new Error('请提供至少一个视频链接，或不带参数启动 UI。');
   }
 
@@ -120,7 +128,7 @@ function isDouyinJob(url, options) {
 }
 
 async function main() {
-  if (process.argv.length <= 2 && process.stdin.isTTY) {
+  if (process.argv.length <= 2) {
     await runUiSession();
     return;
   }
@@ -128,6 +136,13 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
     printHelp();
+    return;
+  }
+  if (options.diagnose) {
+    const browserPath = await findBrowser(null).catch(() => '');
+    const ytDlpPath = await findBundledTool('yt-dlp') || await findYtDlp(options.ytDlpPath).catch(() => '');
+    const ffmpegPath = await findBundledTool('ffmpeg') || await findFfmpeg(options.ffmpegPath).catch(() => '');
+    console.log(JSON.stringify(await diagnoseEnvironment({ browserPath, ytDlpPath, ffmpegPath }), null, 2));
     return;
   }
 

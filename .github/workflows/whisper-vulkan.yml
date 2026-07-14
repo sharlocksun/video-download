@@ -1,0 +1,32 @@
+name: build-whisper-vulkan-component
+on:
+  workflow_dispatch:
+jobs:
+  build-vulkan:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Vulkan SDK and Ninja
+        shell: powershell
+        run: |
+          choco install vulkan-sdk ninja --yes --no-progress
+          "VULKAN_SDK=C:\VulkanSDK\$((Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build whisper.cpp Vulkan
+        shell: powershell
+        run: |
+          git clone --depth 1 --branch v1.9.1 https://github.com/ggml-org/whisper.cpp.git build/whisper.cpp
+          cmake -S build/whisper.cpp -B build/whisper-vulkan -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build build/whisper-vulkan --config Release
+          New-Item -ItemType Directory -Force component/Release | Out-Null
+          Copy-Item build/whisper-vulkan/bin/*.exe component/Release/
+          Copy-Item build/whisper-vulkan/bin/*.dll component/Release/
+          Compress-Archive -Path component/* -DestinationPath whisper-vulkan-win-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whisper-vulkan-win-x64
+          path: whisper-vulkan-win-x64.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: components-v1
+          name: Optional runtime components v1
+          files: whisper-vulkan-win-x64.zip

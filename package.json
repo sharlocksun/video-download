@@ -1,18 +1,23 @@
 {
-  "name": "muxin-video-downloader",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "木辛说多平台视频下载器",
-  "main": "src/main.mjs",
-  "scripts": {
-    "start": "node ./src/main.mjs",
-    "check": "node --check ./src/main.mjs",
-    "check:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/check-all.ps1",
-    "build:exe": "node ./scripts/build-exe.mjs"
-  },
-  "devDependencies": {
-    "esbuild": "^0.28.1",
-    "postject": "^1.0.0-alpha.6"
-  }
+    "name": "muxin-video-downloader",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "木辛说多平台视频下载器",
+    "main": "src/main.mjs",
+    "scripts": {
+        "start": "node ./src/main.mjs",
+        "check": "node --check ./src/main.mjs",
+        "check:all": "node ./scripts/check-all.mjs",
+        "build:exe": "node ./scripts/build-exe.mjs",
+        "build:release": "npm run build:exe && node ./scripts/build-release.mjs",
+        "build:installer": "npm run build:release && powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-installer.ps1",
+        "build:macos": "bash ./scripts/build-macos.sh"
+    },
+    "devDependencies": {
+        "esbuild": "^0.28.1",
+        "png-to-ico": "^3.0.2",
+        "postject": "^1.0.0-alpha.6",
+        "rcedit": "^5.0.2"
+    }
 }

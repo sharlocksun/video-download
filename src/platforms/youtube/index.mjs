@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { access, mkdir, readdir, stat } from 'node:fs/promises';
+import { access, mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { findJavaScriptRuntime } from '../../core/runtime-tools.mjs';
 import { fileURLToPath } from 'node:url';
 import { findFfmpeg } from '../bilibili/index.mjs';
 
@@ -143,10 +144,8 @@ async function findNodeRuntime() {
 
 async function buildYtDlpCommonArgs() {
   const args = ['--ignore-config'];
-  const nodeRuntime = await findNodeRuntime();
-  if (nodeRuntime) {
-    args.push('--js-runtimes', `node:${nodeRuntime}`);
-  }
+  const runtime = await findJavaScriptRuntime();
+  if (runtime) args.push('--js-runtimes', `${runtime.name}:${runtime.path}`);
   return args;
 }
 
@@ -178,14 +177,19 @@ function addDefaultYtDlpCandidates(candidates) {
       path.join(root, 'tools', 'yt-dlp.exe'),
       path.join(root, 'tools', 'yt-dlp', 'yt-dlp.exe'),
       path.join(root, 'tools', 'yt-dlp', 'bin', 'yt-dlp.exe'),
+      path.join(root, 'yt-dlp'),
+      path.join(root, 'runtime', 'yt-dlp'),
+      path.join(root, 'downloads', 'yt-dlp', 'yt-dlp'),
+      path.join(root, 'bin', 'yt-dlp'),
+      path.join(root, 'tools', 'yt-dlp'),
     );
   }
 }
 
 async function findYtDlp(explicitPath = '') {
   const candidates = [];
-  await addExecutableCandidates(candidates, explicitPath, 'yt-dlp.exe');
-  await addExecutableCandidates(candidates, process.env.YT_DLP_PATH, 'yt-dlp.exe');
+  await addExecutableCandidates(candidates, explicitPath, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+  await addExecutableCandidates(candidates, process.env.YT_DLP_PATH, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
   addDefaultYtDlpCandidates(candidates);
   candidates.push('yt-dlp.exe', 'yt-dlp');
 
@@ -363,6 +367,63 @@ function runStreaming(command, args, options = {}) {
   });
 }
 
+async function findFfprobe(ffmpegPath = '') {
+  const candidates = [];
+  const ffmpeg = cleanPathInput(ffmpegPath);
+  if (ffmpeg) {
+    const lower = path.basename(ffmpeg).toLowerCase();
+    if (lower === 'ffmpeg.exe' || lower === 'ffmpeg') {
+      candidates.push(path.join(path.dirname(ffmpeg), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'));
+    } else {
+      candidates.push(
+        path.join(ffmpeg, 'ffprobe.exe'),
+        path.join(ffmpeg, 'ffprobe'),
+        path.join(ffmpeg, 'bin', 'ffprobe.exe'),
+        path.join(ffmpeg, 'bin', 'ffprobe'),
+      );
+    }
+  }
+  candidates.push('ffprobe.exe', 'ffprobe');
+  for (const candidate of [...new Set(candidates.filter(Boolean))]) {
+    if (await canRun(candidate, ['-version'])) return candidate;
+  }
+  return '';
+}
+
+async function hasAudioStream(filePath, ffmpegPath = '') {
+  const ffprobe = await findFfprobe(ffmpegPath);
+  if (!ffprobe) return null;
+  try {
+    const { stdout } = await runCollect(ffprobe, [
+      '-v', 'error',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=codec_type',
+      '-of', 'csv=p=0',
+      filePath,
+    ]);
+    return String(stdout || '').split(/\r?\n/).some((line) => line.trim() === 'audio');
+  } catch {
+    return null;
+  }
+}
+
+async function runYtDlpDownload(ytDlpPath, commonArgs, format, outputPath, url, ffmpegPath, options = {}) {
+  const args = [
+    ...commonArgs,
+    '--no-playlist',
+    '--newline',
+    '-f', format,
+    '--merge-output-format', 'mp4',
+    '-o', outputPath,
+    ...buildYtDlpAuthArgs(options),
+  ];
+  if (ffmpegPath) {
+    args.push('--ffmpeg-location', ffmpegPath);
+  }
+  args.push(url);
+  await runStreaming(ytDlpPath, args, options);
+}
+
 function videoQualitySide(format) {
   const width = Number(format?.width) || 0;
   const height = Number(format?.height) || 0;
@@ -370,25 +431,49 @@ function videoQualitySide(format) {
   return height || width || 0;
 }
 
-function formatSelector(quality, hasFfmpeg, info = null) {
+function combinedFormatSelector(quality, hasFfmpeg, info = null) {
   const key = String(quality || 'best').toLowerCase();
   if (key === 'lowest') {
-    return hasFfmpeg ? 'worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]/worst' : 'worst[ext=mp4]/worst';
+    return hasFfmpeg ? 'worst[acodec!=none][vcodec!=none]/worstvideo*+worstaudio/worst' : 'worst[acodec!=none][vcodec!=none]/worst';
   }
 
   const height = Object.hasOwn(QUALITY_TO_HEIGHT, key)
     ? QUALITY_TO_HEIGHT[key]
     : (/^\d{3,4}p?$/.test(key) ? Number(key.replace(/p$/, '')) : null);
   if (!height) {
-    return hasFfmpeg ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best' : 'best[ext=mp4]/best';
+    return hasFfmpeg ? 'best[acodec!=none][vcodec!=none]/bestvideo*+bestaudio/best' : 'best[acodec!=none][vcodec!=none]/best';
   }
 
   const videoFormats = (info?.formats || []).filter((item) => item.vcodec && item.vcodec !== 'none' && videoQualitySide(item));
   const vertical = videoFormats.some((item) => Number(item.height) > Number(item.width));
   const dimension = vertical ? 'width' : 'height';
   return hasFfmpeg
-    ? `bestvideo[ext=mp4][${dimension}<=${height}]+bestaudio[ext=m4a]/best[ext=mp4][${dimension}<=${height}]/best[${dimension}<=${height}]/best`
-    : `best[${dimension}<=${height}][ext=mp4]/best[${dimension}<=${height}]/best`;
+    ? `best[${dimension}<=${height}][acodec!=none][vcodec!=none]/bestvideo*[${dimension}<=${height}]+bestaudio/best[${dimension}<=${height}]/best`
+    : `best[${dimension}<=${height}][acodec!=none][vcodec!=none]/best[${dimension}<=${height}]/best`;
+}
+
+function formatSelector(quality, hasFfmpeg, info = null, platformSlug = 'youtube') {
+  if (platformSlug === 'tiktok' || platformSlug === 'instagram') {
+    return combinedFormatSelector(quality, hasFfmpeg, info);
+  }
+  const key = String(quality || 'best').toLowerCase();
+  if (key === 'lowest') {
+    return hasFfmpeg ? 'worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4][acodec!=none][vcodec!=none]/worst[acodec!=none][vcodec!=none]/worst' : 'worst[ext=mp4][acodec!=none][vcodec!=none]/worst[acodec!=none][vcodec!=none]/worst';
+  }
+
+  const height = Object.hasOwn(QUALITY_TO_HEIGHT, key)
+    ? QUALITY_TO_HEIGHT[key]
+    : (/^\d{3,4}p?$/.test(key) ? Number(key.replace(/p$/, '')) : null);
+  if (!height) {
+    return hasFfmpeg ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best' : 'best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best';
+  }
+
+  const videoFormats = (info?.formats || []).filter((item) => item.vcodec && item.vcodec !== 'none' && videoQualitySide(item));
+  const vertical = videoFormats.some((item) => Number(item.height) > Number(item.width));
+  const dimension = vertical ? 'width' : 'height';
+  return hasFfmpeg
+    ? `bestvideo[ext=mp4][${dimension}<=${height}]+bestaudio[ext=m4a]/best[ext=mp4][${dimension}<=${height}][acodec!=none][vcodec!=none]/best[${dimension}<=${height}][acodec!=none][vcodec!=none]/best`
+    : `best[${dimension}<=${height}][ext=mp4][acodec!=none][vcodec!=none]/best[${dimension}<=${height}][acodec!=none][vcodec!=none]/best`;
 }
 
 function describeFormats(info) {
@@ -452,19 +537,26 @@ function explainYtDlpError(error, platformName, options = {}) {
   const message = String(error?.message || error || '');
   const selectedBrowser = normalizeBrowserAuthValue(options.ytDlpCookiesFromBrowser);
   const selectedBrowserName = browserLabel(selectedBrowser);
+  const lowerPlatform = String(platformName || '').toLowerCase();
+  const isYoutube = lowerPlatform.includes('youtube');
+  const isInstagram = lowerPlatform.includes('instagram');
   if (/Failed to decrypt with DPAPI/i.test(message)) {
     const browserText = selectedBrowser ? selectedBrowserName : '当前浏览器';
-    return new Error(`${browserText} 的 YouTube Cookie 被 Windows/浏览器加密保护，yt-dlp 无法解密。请使用本程序登录窗口，或改为不使用登录状态。原始错误：${message}`);
+    return new Error(`${browserText} 的 ${platformName} Cookie 被 Windows/浏览器加密保护，yt-dlp 无法解密。请使用本程序登录窗口，或改为不使用登录状态。原始错误：${message}`);
   }
   if (/Could not copy .*cookie database/i.test(message)) {
     const browserText = selectedBrowser ? selectedBrowserName : '对应浏览器';
-    return new Error(`${browserText} 的 YouTube 登录状态读取失败。请使用本程序登录窗口，或改为不使用登录状态。原始错误：${message}`);
+    return new Error(`${browserText} 的 ${platformName} 登录状态读取失败。请使用本程序登录窗口，或改为不使用登录状态。原始错误：${message}`);
   }
   if (/n challenge solving failed|Only images are available|Requested format is not available/i.test(message)) {
-    return new Error(`${platformName} 没有拿到可下载的视频流。通常是 yt-dlp 没有可用的 JavaScript 运行时，无法解析 YouTube 的播放挑战。请安装 Node.js，或把 node.exe 放到系统 PATH 后重试。原始错误：${message}`);
+    if (isYoutube) {
+      return new Error(`${platformName} 没有拿到可下载的视频流。通常是 yt-dlp 没有可用的 JavaScript 运行时，无法解析 YouTube 的播放挑战。请在“环境与组件”中修复 Deno 运行时后重试。原始错误：${message}`);
+    }
+    return new Error(`${platformName} 没有拿到可下载的视频流。请先确认链接在浏览器里可访问；如果需要登录，请在当前平台的登录来源里选择本程序登录窗口并登录。原始错误：${message}`);
   }
-  if (/Sign in to confirm|not a bot|cookies-from-browser|cookies/i.test(message)) {
-    return new Error(`${platformName} 触发了平台登录/机器人验证。请在 YouTube 登录来源里选择本程序登录窗口并登录，或改为不使用登录状态。原始错误：${message}`);
+  if (/Sign in to confirm|not a bot|cookies-from-browser|cookies|empty media response|accessible in your browser/i.test(message)) {
+    const authLabel = isInstagram ? 'Instagram 登录来源' : isYoutube ? 'YouTube 登录来源' : `${platformName} 登录来源`;
+    return new Error(`${platformName} 触发了平台登录/机器人验证。请在 ${authLabel} 里选择本程序登录窗口并登录，或改为不使用登录状态。原始错误：${message}`);
   }
   return error;
 }
@@ -509,7 +601,7 @@ async function downloadWithYtDlp(url, options = {}, platformName = 'YouTube', pl
   const ffmpegPath = await findFfmpeg(options.ffmpegPath);
   const hasFfmpeg = Boolean(ffmpegPath);
   const outputPath = await buildOutputPath(options.outDir, options.nameTemplate, info, options.overwrite, platformSlug);
-  const format = formatSelector(options.quality, hasFfmpeg, info);
+  const format = formatSelector(options.quality, hasFfmpeg, info, platformSlug);
 
   reportLog(options, `  Title: ${info.title || '(no title)'}`);
   reportLog(options, `  ID: ${info.id}`);
@@ -533,21 +625,29 @@ async function downloadWithYtDlp(url, options = {}, platformName = 'YouTube', pl
   await mkdir(path.resolve(options.outDir), { recursive: true });
   reportLog(options, `  Saving: ${outputPath}`);
   const commonArgs = await buildYtDlpCommonArgs();
-  const args = [
-    ...commonArgs,
-    '--no-playlist',
-    '--newline',
-    '-f', format,
-    '--merge-output-format', 'mp4',
-    '-o', outputPath,
-    ...buildYtDlpAuthArgs(options),
-  ];
-  if (ffmpegPath) {
-    args.push('--ffmpeg-location', ffmpegPath);
-  }
-  args.push(url);
   try {
-    await runStreaming(info.ytDlpPath, args, options);
+    await runYtDlpDownload(info.ytDlpPath, commonArgs, format, outputPath, url, ffmpegPath, options);
+    if (platformSlug === 'tiktok' || platformSlug === 'instagram') {
+      const audio = await hasAudioStream(outputPath, ffmpegPath);
+      const platformLabel = platformSlug === 'instagram' ? 'Instagram' : 'TikTok';
+      if (audio === false) {
+        const retryFormat = hasFfmpeg
+          ? 'bestvideo*+bestaudio/best[acodec!=none][vcodec!=none]/best'
+          : 'best[acodec!=none][vcodec!=none]/best';
+        reportLog(options, `  ${platformLabel} 音轨检测：当前文件没有音频，正在换用备用格式重新下载...`);
+        await unlink(outputPath).catch(() => {});
+        reportLog(options, `  Retry format: ${retryFormat}`);
+        await runYtDlpDownload(info.ytDlpPath, commonArgs, retryFormat, outputPath, url, ffmpegPath, options);
+        const retryAudio = await hasAudioStream(outputPath, ffmpegPath);
+        if (retryAudio === false) {
+          throw new Error(`${platformLabel} 下载完成但文件仍然没有音轨。可能该链接的可用格式本身不含音频，或平台返回了异常视频流。`);
+        }
+      } else if (audio === true) {
+        reportLog(options, `  ${platformLabel} 音轨检测：已包含音频。`);
+      } else {
+        reportLog(options, `  ${platformLabel} 音轨检测：未找到 ffprobe，无法自动校验音轨。`);
+      }
+    }
   } catch (error) {
     throw explainYtDlpError(error, platformName, options);
   }

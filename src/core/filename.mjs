@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { resolveDefaultVideoDir, resolveInstallDir } from './app-paths.mjs';
 
 function normalizeNameTemplateForBatch(template, count) {
   const value = String(template || '').trim() || '%title%_%id%.mp4';
@@ -14,16 +15,12 @@ function normalizeNameTemplateForBatch(template, count) {
 }
 
 function resolveBaseDir() {
-  const exeName = path.basename(process.execPath).toLowerCase();
-  if (exeName === 'muxin-video-downloader.exe') {
-    const exeDir = path.dirname(process.execPath);
-    return path.basename(exeDir).toLowerCase() === 'dist' ? path.dirname(exeDir) : exeDir;
-  }
-  return process.cwd();
+  return resolveInstallDir();
 }
 
 function resolveOutDir(input) {
-  const value = String(input || '').trim() || 'videos';
+  const value = String(input || '').trim();
+  if (!value || value === 'videos') return resolveDefaultVideoDir();
   if (path.isAbsolute(value)) {
     return value;
   }

@@ -3,6 +3,7 @@ import { copyFile, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { rcedit } from 'rcedit';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -12,6 +13,7 @@ const bundledScript = path.join(buildDir, 'muxin-video-downloader.cjs');
 const seaBlob = path.join(buildDir, 'muxin-video-downloader.blob');
 const seaConfig = path.join(buildDir, 'sea-config.json');
 const exePath = path.join(distDir, 'muxin-video-downloader.exe');
+const iconPath = path.join(rootDir, 'assets', 'app-icon', 'app-icon.ico');
 
 function run(command, args) {
   return new Promise((resolve, reject) => {
@@ -50,6 +52,18 @@ await writeFile(seaConfig, JSON.stringify({
 
 await run(process.execPath, ['--experimental-sea-config', seaConfig]);
 await copyFile(process.execPath, exePath);
+
+await rcedit(exePath, {
+  icon: iconPath,
+  'file-version': '0.1.0',
+  'product-version': '0.1.0',
+  'version-string': {
+    CompanyName: '木辛说',
+    FileDescription: '木辛说视频下载器',
+    ProductName: '木辛说视频下载器',
+    OriginalFilename: '木辛说视频下载器.exe',
+  },
+});
 
 const postjectCli = path.join(rootDir, 'node_modules', 'postject', 'dist', 'cli.js');
 
