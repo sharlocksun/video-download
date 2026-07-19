@@ -15,14 +15,14 @@ import { cdp, cookiesToHeader, getAllCookies, getCookiesForUrls, startCdpBrowser
 import { makeTempDir, removeTempDir } from '../core/temp-dir.mjs';
 import { findBrowser } from '../platforms/index.mjs';
 import { findFfmpeg, getVideoInfo as getBilibiliVideoInfo } from '../platforms/bilibili/index.mjs';
-import { closeDouyinSession, createDouyinSession } from '../platforms/douyin/index.mjs';
-import { closeKuaishouSession, createKuaishouSession } from '../platforms/kuaishou/index.mjs';
+import { closeDouyinSession, createDouyinSession, extractDouyinUrls, resolveDouyinUrl } from '../platforms/douyin/index.mjs';
+import { closeKuaishouSession, createKuaishouSession, getKuaishouApiInfo } from '../platforms/kuaishou/index.mjs';
 import { findYtDlp } from '../platforms/youtube/index.mjs';
 import { chatWithAi, streamChatWithAi, testAiConfig } from '../ai/client.mjs';
 import { applyPromptOverride, deleteAiCustomAction, loadAiConfig, loadAiCustomActions, loadAiPromptOverrides, publicAiConfig, saveAiConfig, saveAiCustomAction, saveAiPromptOverride } from '../ai/config.mjs';
 import { analyzeTranscriptLocal } from '../ai/local-analysis.mjs';
 import { analysisDirForSource, assetDirForMedia, extractAudioFile, extractEmbeddedSubtitle, saveAiArtifacts, saveTranscriptArtifacts, sanitizeFilePart } from '../ai/media-tools.mjs';
-import { transcribeLocalMedia } from '../ai/media-transcription.mjs';
+import { diagnoseWhisperSelection, transcribeLocalMedia } from '../ai/media-transcription.mjs';
 import { buildSystemPrompt, buildTranscriptContext, platformActions, quickAction } from '../ai/prompts.mjs';
 import { extractSubtitlesFromUrl } from '../ai/subtitles.mjs';
 import { normalizeTranscriptText } from '../ai/transcript-normalize.mjs';
@@ -835,6 +835,12 @@ async function openUiBrowser(browserPath, uiUrl) {
     `--user-data-dir=${profileDir}`,
     '--no-first-run',
     '--no-default-browser-check',
+    '--disable-extensions',
+    '--disable-component-extensions-with-background-pages',
+    '--disable-background-mode',
+    '--no-service-autorun',
+    '--disable-session-crashed-bubble',
+    '--disable-features=msEdgeFirstRunExperience,msEdgeSidebarV2',
     `--app=${uiUrl}`,
   ];
 
@@ -861,7 +867,10 @@ async function runUiSession() {
   const queue = [];
   const douyinSourceCache = new Map();
   const kuaishouSourceCache = new Map();
+  const tiktokSourceCache = new Map();
   const stats = { done: 0, failed: 0 };
+  const douyinProfileDir = path.join(dataDir, 'douyin-profile');
+  const kuaishouProfileDir = path.join(dataDir, 'kuaishou-profile');
   const bilibiliLogin = {
     browser: null,
     cookieHeader: '',
@@ -911,12 +920,117 @@ async function runUiSession() {
   const getCachedKuaishouSource = (videoUrl) => {
     return getCachedSource(kuaishouSourceCache, videoUrl);
   };
+  const hasUsableKuaishouSource = (payload) => Boolean(
+    payload?.info?.src
+    || (payload?.info?.kind === 'photo' && Array.isArray(payload.info.images) && payload.info.images.length),
+  );
+  const getCachedTiktokSource = (videoUrl) => getCachedSource(tiktokSourceCache, videoUrl);
+  const hasUsableTiktokSource = (payload) => Boolean(
+    (payload?.info?.rawInfo
+      && Array.isArray(payload.info.formats)
+      && payload.info.formats.some((item) => item?.url))
+    || (payload?.info?.kind === 'photo'
+      && Array.isArray(payload.info.images)
+      && payload.info.images.length),
+  );
   const getCachedDouyinSource = (videoUrl) => getCachedSource(douyinSourceCache, videoUrl);
+  const hasUsableDouyinSource = (payload) => Boolean(
+    payload?.info?.src
+    || (payload?.info?.kind === 'photo' && Array.isArray(payload.info.images) && payload.info.images.length),
+  );
+
+  const isDouyinAccessRetryable = (error) => {
+    if (error?.douyinMediaDownload) return false;
+    const message = String(error?.message || error || '');
+    if (/任务已终止|aborted|abort/i.test(message)) return false;
+    return /Could not find|aweme detail|video source|登录|验证|captcha|HTTP (?:401|403|429)|HTML instead of media|ECONNREFUSED|ECONNRESET|WebSocket|remote debugger|timeout/i.test(message);
+  };
+
+  const hasLiveDouyinSession = async () => {
+    if (!activeDouyinSession?.page?.webSocketDebuggerUrl) return false;
+    try {
+      await cdp(activeDouyinSession.page.webSocketDebuggerUrl, 'Browser.getVersion', {}, 3000);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const ensureVisibleDouyinSession = async (timeoutMs, initialUrl, reason) => {
+    if (!['quality-auth-fallback', 'download-auth-fallback'].includes(reason)) {
+      throw new Error('抖音登录窗口只能由识别或下载失败后的登录回退触发。');
+    }
+    if (await hasLiveDouyinSession()) return activeDouyinSession;
+    if (activeDouyinSession) {
+      await closeDouyinSession(activeDouyinSession).catch(() => {});
+      activeDouyinSession = null;
+    }
+    activeDouyinSession = await createDouyinSession(browserPath, {
+      timeoutMs,
+      profileDir: douyinProfileDir,
+      initialUrl: await resolveDouyinUrl(initialUrl, Math.min(timeoutMs, 15_000)) || 'https://www.douyin.com/',
+    });
+    return activeDouyinSession;
+  };
 
   const emit = (event, data) => {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const client of clients) {
       client.write(payload);
+    }
+  };
+  const liveKuaishouSession = async () => {
+    const session = activeKuaishouSession;
+    if (!session?.proc || session.proc.killed || session.proc.exitCode !== null) {
+      activeKuaishouSession = null;
+      return null;
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${session.port}/json/version`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return session;
+    } catch {
+      await closeKuaishouSession(session, { keepProfile: true }).catch(() => {});
+      activeKuaishouSession = null;
+      return null;
+    }
+  };
+  const ensureKuaishouSession = async (timeoutMs) => {
+    const existing = await liveKuaishouSession();
+    if (existing) return { session: existing, reused: true };
+    activeKuaishouSession = await createKuaishouSession(browserPath, {
+      timeoutMs,
+      profileDir: kuaishouProfileDir,
+      keepProfile: true,
+    });
+    return { session: activeKuaishouSession, reused: false };
+  };
+  const prepareKuaishouOptions = async (videoUrl, options, contextLabel = '任务') => {
+    if (options.kuaishouResolvedInfo) return options;
+    try {
+      const apiInfo = await getKuaishouApiInfo(videoUrl, options);
+      emit('log', {
+        message: apiInfo.kind === 'photo'
+          ? `快手${contextLabel}已识别为图集，将直接使用原图数据，不打开浏览器窗口。`
+          : `快手${contextLabel}已通过接口获取视频源，不打开浏览器窗口。`,
+      });
+      return {
+        ...options,
+        kuaishouResolvedInfo: {
+          platform: 'kuaishou',
+          info: apiInfo,
+          pageUrl: videoUrl,
+          capturedAt: Date.now(),
+        },
+      };
+    } catch {
+      const { session, reused } = await ensureKuaishouSession(options.timeoutMs);
+      emit('log', {
+        message: reused
+          ? `快手${contextLabel}将继续使用当前浏览器窗口。`
+          : `快手${contextLabel}已打开浏览器窗口；后续链接会在同一窗口继续处理。`,
+      });
+      return { ...options, kuaishouSession: session };
     }
   };
   const emitQueue = () => emit('queue', { queued: queue.length });
@@ -1490,7 +1604,7 @@ async function runUiSession() {
     stoppingDownloads = false;
     emitRunState();
     let douyinSession = null;
-    let kuaishouSession = null;
+    let kuaishouSession = await liveKuaishouSession();
     try {
       while (queue.length) {
         if (stoppingDownloads) break;
@@ -1502,18 +1616,28 @@ async function runUiSession() {
         emit('log', { message: `开始任务：${job.url}` });
         try {
           let jobOptions = { ...job.options, signal: activeJobController.signal };
+          const douyinFullTimeoutMs = jobOptions.timeoutMs;
           if (jobOptions.platform === 'douyin' && !jobOptions.douyinResolvedInfo) {
             if (kuaishouSession) {
               await closeKuaishouSession(kuaishouSession, jobOptions).catch(() => {});
               kuaishouSession = null;
+              activeKuaishouSession = null;
             }
-            if (!douyinSession) {
-              emit('log', { message: '抖音批量任务将复用同一个浏览器窗口。' });
-              douyinSession = await createDouyinSession(browserPath, {
-                timeoutMs: jobOptions.timeoutMs,
-              });
-              activeDouyinSession = douyinSession;
+            if (await hasLiveDouyinSession()) {
+              douyinSession = activeDouyinSession;
+              jobOptions = { ...jobOptions, douyinSession };
+            } else {
+              if (activeDouyinSession) {
+                await closeDouyinSession(activeDouyinSession).catch(() => {});
+                activeDouyinSession = null;
+              }
+              jobOptions = {
+                ...jobOptions,
+                timeoutMs: Math.min(douyinFullTimeoutMs, 30_000),
+              };
             }
+          } else if (jobOptions.platform === 'douyin' && jobOptions.douyinResolvedInfo && activeDouyinSession) {
+            douyinSession = activeDouyinSession;
             jobOptions = { ...jobOptions, douyinSession };
           } else if (jobOptions.platform === 'kuaishou' && !jobOptions.kuaishouResolvedInfo) {
             if (douyinSession) {
@@ -1521,14 +1645,8 @@ async function runUiSession() {
               douyinSession = null;
               activeDouyinSession = null;
             }
-            if (!kuaishouSession) {
-              emit('log', { message: '快手批量任务将复用同一个浏览器窗口。' });
-              kuaishouSession = await createKuaishouSession(browserPath, {
-                timeoutMs: jobOptions.timeoutMs,
-              });
-              activeKuaishouSession = kuaishouSession;
-            }
-            jobOptions = { ...jobOptions, kuaishouSession };
+            jobOptions = await prepareKuaishouOptions(job.url, jobOptions, '下载任务');
+            kuaishouSession = jobOptions.kuaishouSession || await liveKuaishouSession();
           } else {
             if (douyinSession && jobOptions.platform !== 'douyin') {
               await closeDouyinSession(douyinSession, jobOptions).catch(() => {});
@@ -1541,11 +1659,32 @@ async function runUiSession() {
               activeKuaishouSession = null;
             }
           }
-          const output = await downloadVideo(job.url, {
-            ...jobOptions,
+          const runJob = (attemptOptions) => downloadVideo(job.url, {
+            ...attemptOptions,
             onLog: (message) => emit('log', { message }),
             onProgress: (payload) => emit('progress', payload),
           }, browserPath);
+          let output;
+          try {
+            output = await runJob(jobOptions);
+          } catch (error) {
+            const shouldRetryWithLogin = jobOptions.platform === 'douyin'
+              && !jobOptions.douyinSession
+              && isDouyinAccessRetryable(error);
+            if (!shouldRetryWithLogin) throw error;
+            emit('log', { message: '抖音免登录解析未通过，已打开一个抖音窗口。请完成登录或安全验证，程序会自动继续当前任务。' });
+            douyinSession = await ensureVisibleDouyinSession(
+              douyinFullTimeoutMs,
+              job.url,
+              'download-auth-fallback',
+            );
+            jobOptions = {
+              ...jobOptions,
+              timeoutMs: douyinFullTimeoutMs,
+              douyinSession,
+            };
+            output = await runJob(jobOptions);
+          }
           stats.done += 1;
           emit('done', {
             queued: queue.length,
@@ -1576,10 +1715,6 @@ async function runUiSession() {
       if (douyinSession) {
         await closeDouyinSession(douyinSession).catch(() => {});
         activeDouyinSession = null;
-      }
-      if (kuaishouSession) {
-        await closeKuaishouSession(kuaishouSession).catch(() => {});
-        activeKuaishouSession = null;
       }
       running = false;
       stoppingDownloads = false;
@@ -1623,7 +1758,14 @@ async function runUiSession() {
         const browserPath = await findBrowser(null).catch(() => '');
         const ytDlpPath = await findYtDlp(defaultToolPaths.ytDlpPath).catch(() => '');
         const ffmpegPath = await findFfmpeg(defaultToolPaths.ffmpegPath).catch(() => '');
-        sendJson(res, 200, { ok: true, environment: await diagnoseEnvironment({ browserPath, ytDlpPath, ffmpegPath }) });
+        const config = await loadAiConfig();
+        const environment = await diagnoseEnvironment({ browserPath, ytDlpPath, ffmpegPath });
+        environment.whisperSelection = await diagnoseWhisperSelection({
+          whisperPath: config.whisperPath,
+          engine: config.whisperEngine,
+          model: config.whisperModel,
+        });
+        sendJson(res, 200, { ok: true, environment });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/update/check') {
@@ -1771,7 +1913,12 @@ async function runUiSession() {
       if (req.method === 'POST' && url.pathname === '/api/ai/config') {
         const body = await readJsonBody(req);
         const config = await saveAiConfig(body);
-        sendJson(res, 200, { ok: true, config: publicAiConfig(config) });
+        const whisper = await diagnoseWhisperSelection({
+          whisperPath: config.whisperPath,
+          engine: config.whisperEngine,
+          model: config.whisperModel,
+        });
+        sendJson(res, 200, { ok: true, config: publicAiConfig(config), whisper });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/ai/test') {
@@ -2248,12 +2395,15 @@ async function runUiSession() {
       }
       if (req.method === 'POST' && url.pathname === '/api/qualities') {
         const body = await readJsonBody(req);
-        const videoUrl = String(body.url || '').trim();
+        const platform = body.platform ? String(body.platform) : '';
+        const rawVideoUrl = String(body.url || '').trim();
+        const videoUrl = platform === 'douyin'
+          ? await resolveDouyinUrl(extractDouyinUrls(rawVideoUrl)[0] || rawVideoUrl)
+          : rawVideoUrl;
         if (!videoUrl) {
           sendJson(res, 400, { ok: false, error: '请先粘贴一条链接。' });
           return;
         }
-        const platform = body.platform ? String(body.platform) : '';
         if (platform === 'bilibili' && bilibiliLogin.browser?.port) {
           await refreshBilibiliCookie().catch(() => {});
         }
@@ -2273,9 +2423,10 @@ async function runUiSession() {
         }
         const logs = [];
         const timeoutSeconds = Number(body.timeoutSeconds) || 180;
+        const fullTimeoutMs = Math.max(30, timeoutSeconds) * 1000;
         await refreshPlatformCookieForRequest(body, platform);
         const authOptions = resolveYoutubeAuthOptions(body, platform);
-        const probeOutput = await downloadVideo(videoUrl, {
+        let probeOptions = {
           outDir: resolveOutDir('videos'),
           nameTemplate: '%title%_%id%.mp4',
           browser: null,
@@ -2285,7 +2436,7 @@ async function runUiSession() {
           infoOnly: true,
           platform,
           quality: 'best',
-          timeoutMs: Math.max(30, timeoutSeconds) * 1000,
+          timeoutMs: platform === 'douyin' ? Math.min(fullTimeoutMs, 30_000) : fullTimeoutMs,
           bilibiliCookieHeader: platform === 'bilibili' ? bilibiliLogin.cookieHeader : '',
           ffmpegPath: body.ffmpegPath ? String(body.ffmpegPath) : '',
           ytDlpPath: body.ytDlpPath ? String(body.ytDlpPath) : '',
@@ -2295,20 +2446,58 @@ async function runUiSession() {
             emit('log', { message });
           },
           onProgress: (payload) => emit('progress', payload),
-        }, browserPath);
-        if (platform === 'douyin' && probeOutput?.info?.src) {
+        };
+        if (platform === 'douyin' && await hasLiveDouyinSession()) {
+          probeOptions.timeoutMs = fullTimeoutMs;
+          probeOptions.douyinSession = activeDouyinSession;
+        }
+        if (platform === 'kuaishou') {
+          probeOptions = await prepareKuaishouOptions(videoUrl, probeOptions, '画质识别');
+        }
+        let probeOutput;
+        try {
+          probeOutput = await downloadVideo(videoUrl, probeOptions, browserPath);
+        } catch (error) {
+          const shouldRetryWithLogin = platform === 'douyin'
+            && !probeOptions.douyinSession
+            && isDouyinAccessRetryable(error);
+          if (!shouldRetryWithLogin) throw error;
+          emit('log', { message: '抖音免登录识别未通过，已打开一个抖音窗口。请完成登录或安全验证，程序会自动继续识别。' });
+          const douyinSession = await ensureVisibleDouyinSession(
+            fullTimeoutMs,
+            videoUrl,
+            'quality-auth-fallback',
+          );
+          probeOutput = await downloadVideo(videoUrl, {
+            ...probeOptions,
+            timeoutMs: fullTimeoutMs,
+            douyinSession,
+          }, browserPath);
+        }
+        if (platform === 'douyin' && hasUsableDouyinSource(probeOutput)) {
           douyinSourceCache.set(sourceCacheKey(videoUrl), {
             savedAt: Date.now(),
             payload: probeOutput,
           });
           emit('log', { message: '已锁定当前抖音视频源，稍后点击下载会直接使用这个视频，不再重新打开页面。' });
         }
-        if (platform === 'kuaishou' && probeOutput?.info?.src) {
+        if (platform === 'kuaishou' && hasUsableKuaishouSource(probeOutput)) {
           kuaishouSourceCache.set(sourceCacheKey(videoUrl), {
             savedAt: Date.now(),
             payload: probeOutput,
           });
           emit('log', { message: '已锁定当前快手视频源，稍后点击下载会直接使用这个视频，不再重新打开页面。' });
+        }
+        if (platform === 'tiktok' && hasUsableTiktokSource(probeOutput)) {
+          tiktokSourceCache.set(sourceCacheKey(videoUrl), {
+            savedAt: Date.now(),
+            payload: probeOutput,
+          });
+          emit('log', {
+            message: probeOutput?.info?.kind === 'photo'
+              ? '已锁定当前 TikTok 图集，稍后点击下载会直接保存这些图片，不再重新解析页面。'
+              : '已锁定当前 TikTok 视频源，稍后点击下载会直接使用这个视频，不再重新解析页面。',
+          });
         }
         const parsed = parseQualityOptions(logs);
         sendJson(res, 200, {
@@ -2320,7 +2509,18 @@ async function runUiSession() {
       }
       if (req.method === 'POST' && url.pathname === '/api/download') {
         const body = await readJsonBody(req);
-        const urls = Array.isArray(body.urls) ? body.urls.map((item) => String(item).trim()).filter(Boolean) : [];
+        const platform = body.platform ? String(body.platform) : '';
+        const rawUrls = Array.isArray(body.urls) ? body.urls.map((item) => String(item).trim()).filter(Boolean) : [];
+        let urls = rawUrls;
+        if (platform === 'douyin') {
+          const extractedUrls = [...new Set(rawUrls.flatMap((item) => {
+            const extracted = extractDouyinUrls(item);
+            return extracted.length ? extracted : [item];
+          }).filter(Boolean))];
+          urls = [...new Set((await Promise.all(
+            extractedUrls.map((item) => resolveDouyinUrl(item)),
+          )).filter(Boolean))];
+        }
         if (!urls.length) {
           sendJson(res, 400, { ok: false, error: '没有提供链接。' });
           return;
@@ -2328,7 +2528,6 @@ async function runUiSession() {
         if (String(body.platform || '') === 'bilibili' && bilibiliLogin.browser?.port) {
           await refreshBilibiliCookie().catch(() => {});
         }
-        const platform = body.platform ? String(body.platform) : '';
         await refreshPlatformCookieForRequest(body, platform);
         const authOptions = resolveYoutubeAuthOptions(body, platform);
         const timeoutSeconds = Number(body.timeoutSeconds) || 180;
@@ -2354,16 +2553,27 @@ async function runUiSession() {
           const jobOptions = { ...options };
           if (jobOptions.platform === 'douyin') {
             const cached = getCachedDouyinSource(item);
-            if (cached?.info?.src) {
+            if (hasUsableDouyinSource(cached)) {
               jobOptions.douyinResolvedInfo = cached;
               emit('log', { message: `抖音已使用识别画质时锁定的视频源：${item}` });
             }
           }
           if (jobOptions.platform === 'kuaishou') {
             const cached = getCachedKuaishouSource(item);
-            if (cached?.info?.src) {
+            if (hasUsableKuaishouSource(cached)) {
               jobOptions.kuaishouResolvedInfo = cached;
               emit('log', { message: `快手已使用识别画质时锁定的视频源：${item}` });
+            }
+          }
+          if (jobOptions.platform === 'tiktok') {
+            const cached = getCachedTiktokSource(item);
+            if (hasUsableTiktokSource(cached)) {
+              jobOptions.tiktokResolvedInfo = cached;
+              emit('log', {
+                message: cached?.info?.kind === 'photo'
+                  ? `TikTok 已使用识别阶段锁定的图集：${item}`
+                  : `TikTok 已使用识别画质时锁定的视频源：${item}`,
+              });
             }
           }
           queue.push({ url: item, options: jobOptions });

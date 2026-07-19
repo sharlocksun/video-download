@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { copyFile, mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -31,6 +31,31 @@ function run(command, args) {
   });
 }
 
+async function removeAuthenticodeSignature(filePath) {
+  const executable = await readFile(filePath);
+  const peOffset = executable.readUInt32LE(0x3c);
+  if (executable.toString('ascii', peOffset, peOffset + 4) !== 'PE\0\0') {
+    throw new Error(`Invalid PE executable: ${filePath}`);
+  }
+
+  const optionalHeaderOffset = peOffset + 24;
+  const optionalHeaderMagic = executable.readUInt16LE(optionalHeaderOffset);
+  const dataDirectoryOffset = optionalHeaderOffset + (optionalHeaderMagic === 0x20b ? 112 : 96);
+  const securityDirectoryOffset = dataDirectoryOffset + (4 * 8);
+  const certificateOffset = executable.readUInt32LE(securityDirectoryOffset);
+  const certificateSize = executable.readUInt32LE(securityDirectoryOffset + 4);
+  if (!certificateOffset || !certificateSize) return;
+
+  executable.writeUInt32LE(0, securityDirectoryOffset);
+  executable.writeUInt32LE(0, securityDirectoryOffset + 4);
+  const certificateEnd = certificateOffset + certificateSize;
+  const unsignedExecutable = certificateEnd <= executable.length
+    && certificateEnd >= executable.length - 8
+    ? executable.subarray(0, certificateOffset)
+    : executable;
+  await writeFile(filePath, unsignedExecutable);
+}
+
 await rm(buildDir, { recursive: true, force: true });
 await mkdir(buildDir, { recursive: true });
 await mkdir(distDir, { recursive: true });
@@ -52,6 +77,7 @@ await writeFile(seaConfig, JSON.stringify({
 
 await run(process.execPath, ['--experimental-sea-config', seaConfig]);
 await copyFile(process.execPath, exePath);
+await removeAuthenticodeSignature(exePath);
 
 await rcedit(exePath, {
   icon: iconPath,

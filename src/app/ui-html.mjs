@@ -708,22 +708,32 @@ function uiHtml(defaults = {}) {
         if (!result.ok) throw new Error(result.error || '检测失败');
         const env = result.environment;
         const engine = env.components.whisperVulkan?.installed ? env.components.whisperVulkan : env.components.whisperCpu;
+        const selectedWhisper = env.whisperSelection || {};
+        const customPython = selectedWhisper.kind === 'python' && selectedWhisper.engineAvailable;
         const installedModels = [
           env.components.whisperSmall?.valid ? 'small' : '',
           env.components.whisperMedium?.valid ? 'medium' : '',
           env.components.whisperLargeV3?.valid ? 'large-v3' : '',
         ].filter(Boolean);
+        const whisperEngineOk = customPython || Boolean(engine?.installed);
+        const whisperModelOk = customPython ? Boolean(selectedWhisper.modelInstalled) : installedModels.length > 0;
+        const whisperEngineDetail = customPython
+          ? 'Python Whisper · ' + (selectedWhisper.device === 'cuda' ? 'CUDA GPU' + (selectedWhisper.gpuName ? ' · ' + selectedWhisper.gpuName : '') : 'CPU')
+          : engine?.installed ? (engine.id === 'whisperVulkan' ? 'Vulkan GPU 版' : 'CPU 版') : '首次使用时可一键安装';
+        const whisperModelDetail = customPython
+          ? selectedWhisper.modelInstalled ? '已识别：' + selectedWhisper.model + '.pt' : selectedWhisper.error
+          : installedModels.length ? '已安装：' + installedModels.join('、') : '可选 small / medium / large-v3';
         environmentGridEl.innerHTML = [
           environmentCard('浏览器', env.tools.browser.ok, env.tools.browser.path),
           environmentCard('yt-dlp', env.tools.ytDlp.ok, env.tools.ytDlp.version || env.tools.ytDlp.path),
           environmentCard('FFmpeg', env.tools.ffmpeg.ok, env.tools.ffmpeg.version || env.tools.ffmpeg.path),
           environmentCard('Deno', env.tools.javascript.ok, env.tools.javascript.version || env.tools.javascript.path),
           environmentCard('GPU', env.gpu.available, env.gpu.name || '将使用 CPU'),
-          environmentCard('Whisper 引擎', Boolean(engine?.installed), engine?.installed ? (engine.id === 'whisperVulkan' ? 'Vulkan GPU 版' : 'CPU 版') : '首次使用时可一键安装'),
-          environmentCard('Whisper 模型', installedModels.length > 0, installedModels.length ? '已安装：' + installedModels.join('、') : '可选 small / medium / large-v3'),
+          environmentCard('Whisper 引擎', whisperEngineOk, whisperEngineDetail),
+          environmentCard('Whisper 模型', whisperModelOk, whisperModelDetail),
           environmentCard('组件磁盘空间', env.disk.freeBytes > 2 * 1024 ** 3, '可用 ' + formatBytes(env.disk.freeBytes)),
         ].join('');
-        environmentSummaryEl.textContent = engine?.installed && installedModels.length ? '本地转写已就绪' : '下载功能可用；Whisper 为可选组件';
+        environmentSummaryEl.textContent = whisperEngineOk && whisperModelOk ? '本地转写已就绪' : '下载功能可用；Whisper 为可选组件';
         const gpuComponentAvailable = env.components.whisperVulkan?.available !== false;
         installWhisperGpuEl.disabled = !env.gpu.vulkan || !gpuComponentAvailable || Boolean(env.components.whisperVulkan?.installed);
         installWhisperGpuEl.textContent = env.components.whisperVulkan?.installed ? 'GPU 加速已安装' : !env.gpu.vulkan ? '虚拟机 / 无 Vulkan GPU' : !gpuComponentAvailable ? 'GPU 组件待发布' : '安装 GPU 加速';
@@ -1568,12 +1578,12 @@ function uiHtml(defaults = {}) {
     }
     const platformPlaceholders = {
       bilibili: 'https://www.bilibili.com/video/BV...\\nhttps://b23.tv/...',
-      douyin: 'https://www.douyin.com/video/...\\nhttps://v.douyin.com/...',
+      douyin: '可粘贴完整抖音分享口令\\nhttps://www.douyin.com/video/...\\nhttps://v.douyin.com/...',
       youtube: 'https://www.youtube.com/watch?v=...\\nhttps://www.youtube.com/shorts/...',
-      kuaishou: 'https://www.kuaishou.com/short-video/...\\nhttps://v.kuaishou.com/...',
-      xiaohongshu: 'https://www.xiaohongshu.com/explore/...\\nhttps://xhslink.com/...',
-      tiktok: 'https://www.tiktok.com/@user/video/...\\nhttps://vm.tiktok.com/...',
-      instagram: 'https://www.instagram.com/reel/...\\nhttps://www.instagram.com/p/...',
+      kuaishou: '可粘贴完整快手分享口令\\nhttps://www.kuaishou.com/short-video/...\\nhttps://v.kuaishou.com/...',
+      xiaohongshu: '可粘贴完整小红书分享文案\\nhttps://www.xiaohongshu.com/explore/...\\nhttps://xhslink.com/...',
+      tiktok: '可粘贴完整 TikTok 分享文案\\nhttps://www.tiktok.com/@user/video/...\\nhttps://vm.tiktok.com/...',
+      instagram: '可粘贴完整 Instagram 分享文案\\nhttps://www.instagram.com/reel/...\\nhttps://www.instagram.com/p/...',
     };
     function updatePlatformVisibility() {
       const platform = platformEl.value;
@@ -1606,6 +1616,8 @@ function uiHtml(defaults = {}) {
       if (platform === 'kuaishou') return host === 'kuaishou.com' || host.endsWith('.kuaishou.com')
         || host === 'kuaishouapp.com' || host.endsWith('.kuaishouapp.com')
         || host === 'gifshow.com' || host.endsWith('.gifshow.com')
+        || host === 'chenzhongtech.com' || host.endsWith('.chenzhongtech.com')
+        || host === 'kwai.com' || host.endsWith('.kwai.com')
         || host === 'ks.com' || host.endsWith('.ks.com');
       if (platform === 'xiaohongshu') return host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com')
         || host === 'xhslink.com' || host.endsWith('.xhslink.com')
@@ -1615,6 +1627,16 @@ function uiHtml(defaults = {}) {
       if (platform === 'instagram') return host === 'instagram.com' || host.endsWith('.instagram.com')
         || host === 'instagr.am' || host.endsWith('.instagr.am');
       return true;
+    }
+
+    function extractInputUrls(value) {
+      const text = String(value || '').trim();
+      if (!text) return [];
+      const matches = text.match(/https?:\\/\\/[^\\s<>"']+/gi) || [];
+      const candidates = matches.length ? matches : text.split(/\\r?\\n/);
+      return [...new Set(candidates
+        .map((item) => String(item || '').trim().replace(/[，。；！、）】》]+$/g, ''))
+        .filter(Boolean))];
     }
 
     const events = new EventSource('/events');
@@ -1761,7 +1783,13 @@ function uiHtml(defaults = {}) {
         }
         document.getElementById('aiApiKey').value = '';
         applyAiConfig(result.config);
-        aiConfigStatusEl.textContent = 'AI 配置已保存。';
+        const whisper = result.whisper || {};
+        aiConfigStatusEl.textContent = whisper.engineAvailable
+          ? whisper.modelInstalled
+            ? 'AI 配置已保存。本地 Whisper 已识别：' + (whisper.kind === 'python' ? 'Python ' + (whisper.device === 'cuda' ? 'CUDA GPU' : 'CPU') : 'whisper.cpp') + ' · ' + whisper.model
+            : 'AI 配置已保存；Whisper 引擎已识别，但模型不可用：' + whisper.error
+          : 'AI 配置已保存；本地 Whisper 未识别：' + (whisper.error || '请检查路径和转写引擎。');
+        await loadEnvironment();
       } catch (error) {
         aiConfigStatusEl.textContent = '保存失败：' + error.message;
       }
@@ -1837,12 +1865,12 @@ function uiHtml(defaults = {}) {
     document.getElementById('ai-prompt-cancel').addEventListener('click', closePromptEditor);
     document.getElementById('ai-add-custom-action').addEventListener('click', openNewPromptEditor);
     urlsEl.addEventListener('input', () => {
-      const firstUrl = urlsEl.value.split(/\\r?\\n/).map((item) => item.trim()).find(Boolean) || '';
+      const firstUrl = extractInputUrls(urlsEl.value)[0] || '';
       aiSourceUrlEl.value = firstUrl;
     });
     document.getElementById('detect-quality').addEventListener('click', async () => {
       const platform = platformEl.value;
-      const urls = document.getElementById('urls').value.split(/\\r?\\n/).map((url) => url.trim()).filter(Boolean);
+      const urls = extractInputUrls(document.getElementById('urls').value);
       if (!urls.length) {
         appendLog('请先粘贴一条链接，再识别画质。');
         return;
@@ -1914,7 +1942,7 @@ function uiHtml(defaults = {}) {
     document.getElementById('download-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const platform = platformEl.value;
-      const urls = document.getElementById('urls').value.split(/\\r?\\n/).map((url) => url.trim()).filter(Boolean);
+      const urls = extractInputUrls(document.getElementById('urls').value);
       if (!urls.length) {
         appendLog('请先粘贴至少一个链接。');
         return;

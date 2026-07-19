@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import {
   access,
+  copyFile,
   mkdir,
   rm,
   stat,
@@ -16,6 +17,7 @@ import { createInterface } from 'node:readline/promises';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { makeTempDir } from '../../core/temp-dir.mjs';
+import { findFfmpeg } from '../bilibili/index.mjs';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -379,12 +381,35 @@ function sanitizeFilePart(value, fallback = 'untitled', maxLength = 120) {
 function extractDouyinId(...values) {
   for (const value of values) {
     const text = String(value || '');
-    const fromVideoPath = text.match(/\/video\/(\d{10,})/);
-    if (fromVideoPath) return fromVideoPath[1];
+    const fromMediaPath = text.match(/\/(?:video|note)\/(\d{10,})/);
+    if (fromMediaPath) return fromMediaPath[1];
     const fromQuery = text.match(/[?&](?:__vid|modal_id|aweme_id|item_id)=(\d{10,})/);
     if (fromQuery) return fromQuery[1];
   }
   return '';
+}
+
+function extractDouyinUrls(value) {
+  const text = String(value || '').trim();
+  if (!text) return [];
+
+  const candidates = text.match(/https?:\/\/[^\s<>"']+/giu) || [text];
+  const urls = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const cleaned = String(candidate || '')
+      .trim()
+      .replace(/[，。；！、）】》]+$/gu, '');
+    try {
+      const parsed = new URL(cleaned);
+      const host = parsed.hostname.toLowerCase();
+      if (host !== 'douyin.com' && !host.endsWith('.douyin.com')) continue;
+      if (seen.has(parsed.href)) continue;
+      seen.add(parsed.href);
+      urls.push(parsed.href);
+    } catch {}
+  }
+  return urls;
 }
 
 function guessId(...values) {
@@ -394,19 +419,41 @@ function guessId(...values) {
 }
 
 function normalizeDouyinUrl(url) {
+  const extracted = extractDouyinUrls(url);
+  const inputUrl = extracted[0] || String(url || '').trim();
   try {
-    const parsed = new URL(url);
-    if (!parsed.hostname.endsWith('douyin.com') || /\/video\/\d{10,}/.test(parsed.pathname)) {
-      return url;
-    }
+    const parsed = new URL(inputUrl);
+    if (!parsed.hostname.endsWith('douyin.com')) return inputUrl;
 
-    const awemeId = extractDouyinId(url);
+    const awemeId = extractDouyinId(inputUrl);
     if (awemeId) {
       return `https://www.douyin.com/video/${awemeId}`;
     }
   } catch {}
 
-  return url;
+  return inputUrl;
+}
+
+async function resolveDouyinUrl(url, timeoutMs = 10_000) {
+  const normalized = normalizeDouyinUrl(url);
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.hostname.toLowerCase() !== 'v.douyin.com') return normalized;
+
+    const response = await fetch(normalized, {
+      redirect: 'manual',
+      headers: { 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(Math.min(Math.max(Number(timeoutMs) || 10_000, 2000), 15_000)),
+    });
+    const location = response.headers.get('location');
+    await response.body?.cancel().catch(() => {});
+    if (!location) return normalized;
+
+    const redirectedUrl = new URL(location, normalized).href;
+    return normalizeDouyinUrl(redirectedUrl);
+  } catch {
+    return normalized;
+  }
 }
 
 function shouldShowBrowser(options = {}) {
@@ -433,7 +480,7 @@ async function getUniquePath(filePath, overwrite) {
   throw new Error(`Could not find a free file name for ${filePath}`);
 }
 
-function buildOutputPath(outDir, template, info, overwrite) {
+function buildOutputFileName(template, info) {
   const date = new Date().toISOString().slice(0, 10);
   const title = sanitizeFilePart(stripDouyinSuffix(info.title), 'douyin', 80);
   const id = sanitizeFilePart(info.id, 'video');
@@ -443,8 +490,25 @@ function buildOutputPath(outDir, template, info, overwrite) {
     .replaceAll('%date%', date);
 
   const safeFileName = sanitizeFilePart(fileName, `douyin_${id}.mp4`);
-  const withExt = path.extname(safeFileName) ? safeFileName : `${safeFileName}.mp4`;
-  return getUniquePath(path.resolve(outDir, withExt), overwrite);
+  return path.extname(safeFileName) ? safeFileName : `${safeFileName}.mp4`;
+}
+
+function buildOutputPath(outDir, template, info, overwrite) {
+  return getUniquePath(path.resolve(outDir, buildOutputFileName(template, info)), overwrite);
+}
+
+async function buildPhotoOutputPath(outDir, template, info, overwrite) {
+  const parsed = path.parse(path.resolve(outDir, buildOutputFileName(template, info)));
+  for (let index = 0; index < 1000; index += 1) {
+    const baseName = index === 0 ? parsed.name : `${parsed.name}_${index}`;
+    const materialDir = path.join(parsed.dir, baseName);
+    if (!overwrite && await exists(materialDir)) continue;
+
+    await mkdir(materialDir, { recursive: true });
+    return path.join(materialDir, `${baseName}${parsed.ext || '.mp4'}`);
+  }
+
+  throw new Error(`Could not find a free folder name for ${parsed.name}`);
 }
 
 function buildCookieHeader(cookies, mediaUrl) {
@@ -477,7 +541,9 @@ async function getVideoInfo(page, timeoutMs, expectedId = '') {
       media.push({
         src: video.currentSrc || video.src || '',
         duration: Number.isFinite(video.duration) ? video.duration : null,
-        readyState: video.readyState
+        readyState: video.readyState,
+        videoWidth: video.videoWidth || 0,
+        videoHeight: video.videoHeight || 0
       });
     }
     for (const source of document.querySelectorAll('source[src]')) {
@@ -500,7 +566,8 @@ async function getVideoInfo(page, timeoutMs, expectedId = '') {
         if (/mime_type=video_mp4/.test(item.src)) score += 40;
         if (/[?&]ch=26(?:&|$)/.test(item.src)) score += 30;
         if (/\\/aweme\\/v1\\/play\\//.test(item.src)) score += 80;
-        if (item.duration && item.duration > 5) score += 20;
+        if (item.videoWidth && item.videoHeight) score += 80;
+        if (item.duration && item.duration > 5 && item.videoWidth && item.videoHeight) score += 20;
         if (/\\/media-video-[^/]+\\//.test(item.src)) score -= 1000;
         if (/\\/media-audio-[^/]+\\//.test(item.src)) score -= 1000;
         if (/\\/uuu_\\d+\\.mp4(?:\\?|$)/.test(item.src)) score -= 1000;
@@ -519,6 +586,8 @@ async function getVideoInfo(page, timeoutMs, expectedId = '') {
         src: item.src,
         duration: item.duration,
         readyState: item.readyState,
+        videoWidth: item.videoWidth || 0,
+        videoHeight: item.videoHeight || 0,
         source: item.source || 'dom',
         score: item.score
       })),
@@ -546,6 +615,305 @@ async function getVideoInfo(page, timeoutMs, expectedId = '') {
 
   const title = lastInfo?.title ? ` Last page title: ${lastInfo.title}` : '';
   throw new Error(`Could not find a video source before timeout.${title}`);
+}
+
+async function getPhotoNoteInfo(page, timeoutMs, expectedId = '') {
+  const expectedIdLiteral = JSON.stringify(String(expectedId || ''));
+  const expression = `(() => {
+    const expectedId = ${expectedIdLiteral};
+    const roots = [];
+    const renderText = document.getElementById('RENDER_DATA')?.textContent || '';
+    if (renderText) {
+      try { roots.push(JSON.parse(decodeURIComponent(renderText))); } catch {}
+    }
+
+    const pushPacePayload = (payloadValue) => {
+      try {
+        const payload = typeof payloadValue === 'string' ? payloadValue.trim() : '';
+        const separator = payload.indexOf(':');
+        const jsonText = /^\\d+:/.test(payload) ? payload.slice(separator + 1) : payload;
+        if (jsonText.startsWith('{') || jsonText.startsWith('[')) roots.push(JSON.parse(jsonText));
+      } catch {}
+    };
+    if (Array.isArray(window.__pace_f)) {
+      for (const entry of window.__pace_f) pushPacePayload(entry?.[1]);
+    }
+
+    for (const script of document.scripts) {
+      const text = (script.textContent || '').trim();
+      if (!text.includes('self.__pace_f.push') || (expectedId && !text.includes(expectedId))) continue;
+      try {
+        const arrayStart = text.indexOf('[', text.indexOf('self.__pace_f.push'));
+        const arrayEnd = text.lastIndexOf(']');
+        if (arrayStart < 0 || arrayEnd <= arrayStart) continue;
+        const args = JSON.parse(text.slice(arrayStart, arrayEnd + 1));
+        pushPacePayload(args?.[1]);
+      } catch {}
+    }
+
+    const objectId = (value) => String(
+      value?.awemeId || value?.aweme_id || value?.groupId || value?.group_id || ''
+    );
+    const candidates = [];
+    const seen = new Set();
+    const walk = (value) => {
+      if (!value || typeof value !== 'object' || seen.has(value) || candidates.length > 50) return;
+      seen.add(value);
+      if ((!expectedId || objectId(value) === expectedId) && objectId(value)) candidates.push(value);
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+      }
+    };
+    for (const root of roots) walk(root);
+
+    const addressUrls = (value) => {
+      if (!value || typeof value !== 'object') return [];
+      const direct = value.urlList || value.url_list || value.downloadUrlList || value.download_url_list;
+      if (Array.isArray(direct)) return direct.filter((item) => /^https?:\\/\\//.test(item || ''));
+      return [];
+    };
+    const imageInfo = (item) => {
+      const addresses = [
+        item?.originImage,
+        item?.origin_image,
+        item?.displayImage,
+        item?.display_image,
+        item?.downloadImage,
+        item?.download_image,
+        item,
+      ].filter(Boolean);
+      let urls = [];
+      for (const address of addresses) {
+        urls = addressUrls(address);
+        if (urls.length) break;
+      }
+      if (!urls.length) return null;
+      const dimensions = addresses.find((address) => address?.width || address?.height) || item || {};
+      return {
+        src: urls[0],
+        alternatives: urls,
+        width: Number(dimensions.width || item?.width) || 0,
+        height: Number(dimensions.height || item?.height) || 0,
+      };
+    };
+    const musicUrl = (music) => {
+      const addresses = [music?.playUrl, music?.play_url, music?.playAddr, music?.play_addr, music];
+      for (const address of addresses) {
+        const urls = addressUrls(address);
+        if (urls.length) return urls[0];
+      }
+      return '';
+    };
+
+    const domImages = [...document.images]
+      .map((image) => ({
+        src: image.currentSrc || image.src || '',
+        width: Number(image.naturalWidth || image.width) || 0,
+        height: Number(image.naturalHeight || image.height) || 0,
+      }))
+      .filter((image) => /^https?:\\/\\//.test(image.src)
+        && image.width >= 400
+        && image.height >= 400
+        && !/aweme-avatar|avatar|emoji|logo/i.test(image.src));
+    const uniqueDomImages = [...new Map(domImages.map((image) => [image.src, image])).values()];
+    const pageText = document.body?.innerText || '';
+    const counterMatch = pageText.match(/(?:^|\\s)(\\d{1,2})\\/(\\d{1,2})(?:\\s|$)/);
+    const expectedImageCount = Number(counterMatch?.[2]) || 0;
+    if (/\\/note\\//.test(location.pathname)
+      && uniqueDomImages.length
+      && (!expectedImageCount || uniqueDomImages.length >= expectedImageCount)) {
+      const media = [...document.querySelectorAll('video, audio')]
+        .map((item) => ({
+          src: item.currentSrc || item.src || '',
+          duration: Number.isFinite(item.duration) ? item.duration : 0,
+        }))
+        .find((item) => /^https?:\\/\\//.test(item.src));
+      return {
+        href: location.href,
+        title: document.title,
+        id: expectedId,
+        kind: 'photo',
+        source: 'photo_note_dom',
+        images: uniqueDomImages.slice(0, expectedImageCount || uniqueDomImages.length),
+        audioSrc: media?.src || '',
+        duration: media?.duration || 0,
+        expectedImageCount,
+      };
+    }
+
+    for (const rawCandidate of candidates) {
+      const nestedCandidates = [
+        rawCandidate?.detail,
+        rawCandidate?.aweme?.detail,
+        rawCandidate?.awemeDetail,
+        rawCandidate?.aweme_detail,
+        rawCandidate,
+      ].filter(Boolean);
+      const candidate = nestedCandidates.find((item) => !expectedId || objectId(item) === expectedId)
+        || rawCandidate;
+      const postInfo = candidate.imagePostInfo || candidate.image_post_info || {};
+      const imageLists = [
+        candidate.images,
+        postInfo.images,
+        postInfo.imageList,
+        postInfo.image_list,
+      ];
+      const rawImages = imageLists.find((items) => Array.isArray(items) && items.length) || [];
+      const images = rawImages.map(imageInfo).filter(Boolean);
+      if (!images.length) continue;
+      const music = candidate.music || postInfo.music || {};
+      let duration = Number(candidate.duration || music.duration || 0) || 0;
+      if (duration > 1000) duration /= 1000;
+      return {
+        href: location.href,
+        title: candidate.desc || candidate.itemTitle || document.title,
+        id: objectId(candidate) || expectedId,
+        kind: 'photo',
+        source: 'photo_note',
+        images,
+        audioSrc: musicUrl(music),
+        duration,
+        awemeType: candidate.awemeType || candidate.aweme_type || null,
+      };
+    }
+
+    return {
+      href: location.href,
+      title: document.title,
+      kind: '',
+      reason: 'photo note data was not found yet',
+      rootCount: roots.length,
+      candidateCount: candidates.length,
+      domImageCount: uniqueDomImages.length,
+      expectedImageCount,
+    };
+  })()`;
+
+  const deadline = Date.now() + timeoutMs;
+  let lastInfo = null;
+  while (Date.now() < deadline) {
+    const result = await cdp(page.webSocketDebuggerUrl, 'Runtime.evaluate', {
+      returnByValue: true,
+      expression,
+    });
+    lastInfo = result.result.value;
+    if (lastInfo?.kind === 'photo' && lastInfo.images?.length) return lastInfo;
+    await sleep(1000);
+  }
+  const reason = lastInfo?.reason
+    ? ` Last photo check: ${lastInfo.reason} (${lastInfo.rootCount || 0} roots, ${lastInfo.candidateCount || 0} candidates, ${lastInfo.domImageCount || 0}/${lastInfo.expectedImageCount || '?'} DOM images)`
+    : '';
+  throw new Error(`Could not find photo note data before timeout.${reason}`);
+}
+
+async function getDouyinInfoFromSharePage(expectedId, timeoutMs = 15_000, quality = 'best') {
+  const id = String(expectedId || '').trim();
+  if (!/^\d{10,}$/.test(id)) throw new Error('Douyin share item ID was not available');
+  let html = '';
+  let item = null;
+  let lastError = null;
+  for (const kind of ['note', 'video']) {
+    const shareUrl = `https://www.iesdouyin.com/share/${kind}/${id}`;
+    try {
+      const response = await fetch(shareUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36',
+          Referer: 'https://www.douyin.com/',
+        },
+        signal: AbortSignal.timeout(Math.min(Math.max(timeoutMs / 2, 3000), 10_000)),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      html = await response.text();
+      const match = html.match(/<script[^>]*>\s*window\._ROUTER_DATA\s*=\s*([\s\S]*?)<\/script>/i);
+      if (!match) throw new Error('router data was not found');
+      const routerData = JSON.parse(match[1].trim().replace(/;\s*$/, ''));
+      const pageData = Object.values(routerData?.loaderData || {})
+        .find((entry) => Array.isArray(entry?.videoInfoRes?.item_list));
+      item = pageData?.videoInfoRes?.item_list
+        ?.find((entry) => String(entry?.aweme_id || '') === id)
+        || pageData?.videoInfoRes?.item_list?.[0]
+        || null;
+      if (item) break;
+      throw new Error('item data was not found');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!item) throw new Error(`Douyin share page failed: ${lastError?.message || 'unknown error'}`);
+  const rawImages = Array.isArray(item?.images) ? item.images : [];
+  const images = rawImages.map((image) => {
+    const urls = Array.isArray(image?.url_list) ? image.url_list.filter(Boolean) : [];
+    return {
+      src: urls[0] || '',
+      alternatives: urls,
+      width: Number(image?.width) || 0,
+      height: Number(image?.height) || 0,
+    };
+  }).filter((image) => /^https?:\/\//.test(image.src));
+  if (images.length) {
+    const directAudio = String(item?.video?.play_addr?.uri || '');
+    const audioMatch = html.match(/<audio[^>]+src=["']([^"']+)["']/i);
+    return {
+      href: `https://www.douyin.com/note/${id}`,
+      title: item?.desc || `douyin_note_${id}`,
+      id,
+      kind: 'photo',
+      source: 'photo_note_share',
+      images,
+      audioSrc: /^https?:\/\//.test(directAudio) ? directAudio : (audioMatch?.[1] || '').replace(/&amp;/g, '&'),
+      duration: Number(item?.music?.duration) || 0,
+      awemeType: item?.aweme_type || null,
+    };
+  }
+
+  const rawPlayUrl = item?.video?.play_addr?.url_list?.[0] || '';
+  if (!/^https?:\/\//.test(rawPlayUrl)) throw new Error('The Douyin share page did not contain a playable video URL');
+  const originalWidth = Number(item?.video?.width) || 0;
+  const originalHeight = Number(item?.video?.height) || 0;
+  const originalDimension = originalWidth && originalHeight
+    ? Math.min(originalWidth, originalHeight)
+    : Math.max(originalWidth, originalHeight);
+  const maxDimension = Math.min(originalDimension || 1080, 1080);
+  const qualityDimensions = [...new Set([maxDimension, 720, 480]
+    .filter((dimension) => dimension > 0 && dimension <= maxDimension))]
+    .sort((a, b) => b - a);
+  const qualityKey = String(quality || 'best').toLowerCase();
+  const requestedTarget = douyinTargetQuality(qualityKey);
+  const target = qualityKey === 'lowest'
+    ? qualityDimensions[qualityDimensions.length - 1]
+    : Math.min(requestedTarget || maxDimension, maxDimension);
+  const buildPlayUrl = (dimension) => {
+    const parsed = new URL(rawPlayUrl.replace('/playwm/', '/play/'));
+    parsed.searchParams.set('ratio', `${dimension}p`);
+    return parsed.href;
+  };
+  const dimensions = (dimension) => originalWidth <= originalHeight
+    ? { width: dimension, height: originalWidth ? Math.round(dimension * originalHeight / originalWidth) : Math.round(dimension * 16 / 9) }
+    : { width: originalHeight ? Math.round(dimension * originalWidth / originalHeight) : Math.round(dimension * 16 / 9), height: dimension };
+  const qualityOptions = qualityDimensions
+    .map((dimension) => ({
+      src: buildPlayUrl(dimension),
+      source: 'share_play',
+      dimension,
+      ...dimensions(dimension),
+    }));
+  const selected = [...qualityOptions].sort((a, b) => (
+    Math.abs(a.dimension - target) - Math.abs(b.dimension - target)
+    || (a.dimension < target ? 1 : 0) - (b.dimension < target ? 1 : 0)
+  ))[0];
+  await sleep(Math.min(8000, Math.max(2000, timeoutMs / 3)));
+  return {
+    href: `https://www.douyin.com/video/${id}`,
+    title: item?.desc || `douyin_${id}`,
+    id,
+    src: selected.src,
+    source: selected.source,
+    width: selected.width,
+    height: selected.height,
+    duration: Number(item?.video?.duration) > 1000 ? Number(item.video.duration) / 1000 : Number(item?.video?.duration) || 0,
+    availableQualities: qualityOptions,
+    awemeType: item?.aweme_type || null,
+  };
 }
 
 async function getAwemeDetailInfo(page, timeoutMs, quality = 'best', expectedId = '') {
@@ -709,6 +1077,24 @@ async function getAwemeDetailInfo(page, timeoutMs, quality = 'best', expectedId 
   throw new Error(`Could not find an aweme detail media URL before timeout.${reason}`);
 }
 
+async function resolveDouyinVideoInfo(page, timeoutMs, quality = 'best', expectedId = '') {
+  const fallbackDelayMs = Math.min(10_000, Math.max(2_000, Math.floor(timeoutMs / 3)));
+  const fallbackTimeoutMs = Math.max(5_000, timeoutMs - fallbackDelayMs);
+  try {
+    return await Promise.any([
+      getDouyinInfoFromSharePage(expectedId, Math.min(timeoutMs, 15_000), quality),
+      getAwemeDetailInfo(page, timeoutMs, quality, expectedId),
+      sleep(1500).then(() => getPhotoNoteInfo(page, fallbackTimeoutMs, expectedId)),
+      sleep(fallbackDelayMs).then(() => getVideoInfo(page, fallbackTimeoutMs, expectedId)),
+    ]);
+  } catch (error) {
+    const messages = Array.isArray(error?.errors)
+      ? error.errors.map((item) => item?.message || String(item)).filter(Boolean)
+      : [error?.message || String(error)];
+    throw new Error(messages.join(' | '));
+  }
+}
+
 async function resetDouyinPageForSwitch(page) {
   if (!page?.webSocketDebuggerUrl) return;
   await cdp(page.webSocketDebuggerUrl, 'Page.stopLoading').catch(() => {});
@@ -720,15 +1106,26 @@ async function resetDouyinPageForSwitch(page) {
   }).catch(() => {});
 }
 
-async function downloadToFile(info, outputPath, pageUrl, cookies, options = {}) {
+async function downloadToFileOnce(info, outputPath, pageUrl, cookies, options = {}) {
   if (options.signal?.aborted) {
     throw new Error('任务已终止');
   }
+  const mediaHost = (() => {
+    try {
+      return new URL(info.src).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+  })();
+  const omitReferer = mediaHost === 'aweme.snssdk.com'
+    || mediaHost.endsWith('.douyinvod.com')
+    || mediaHost.endsWith('.bytevcloud.com')
+    || mediaHost.endsWith('.qrstuvwxyzab.com');
   const headers = {
-    Referer: info.href || pageUrl,
     'User-Agent': USER_AGENT,
     Range: 'bytes=0-',
   };
+  if (!omitReferer) headers.Referer = info.href || pageUrl;
   const cookieHeader = buildCookieHeader(cookies, info.src);
   if (cookieHeader) {
     headers.Cookie = cookieHeader;
@@ -736,7 +1133,10 @@ async function downloadToFile(info, outputPath, pageUrl, cookies, options = {}) 
 
   const response = await fetch(info.src, { headers, signal: options.signal });
   if (!response.ok && response.status !== 206) {
-    throw new Error(`Video request returned HTTP ${response.status}`);
+    const error = new Error(`Video request returned HTTP ${response.status}`);
+    error.douyinMediaDownload = true;
+    error.httpStatus = response.status;
+    throw error;
   }
   const contentType = response.headers.get('content-type') || '';
   if (contentType.includes('text/html')) {
@@ -794,7 +1194,164 @@ async function downloadToFile(info, outputPath, pageUrl, cookies, options = {}) 
   return stat(outputPath);
 }
 
-async function startBrowser(browserPath, port, profileDir, showBrowser) {
+async function downloadToFile(info, outputPath, pageUrl, cookies, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.downloadAttempts) || 3);
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await downloadToFileOnce(info, outputPath, pageUrl, cookies, options);
+    } catch (error) {
+      lastError = error;
+      await rm(outputPath, { force: true }).catch(() => {});
+      if (options.signal?.aborted || /任务已终止|aborted|abort/i.test(String(error?.message || error))) {
+        throw error;
+      }
+      if (attempt >= maxAttempts) break;
+      reportLog(options, `  媒体连接中断，正在重试（${attempt}/${maxAttempts - 1}）...`);
+      await sleep(500 * attempt);
+    }
+  }
+  if (lastError && typeof lastError === 'object') {
+    lastError.douyinMediaDownload = true;
+  }
+  throw lastError;
+}
+
+function isPhotoNoteInfo(info) {
+  return info?.kind === 'photo' && Array.isArray(info.images) && info.images.length > 0;
+}
+
+async function runPhotoSlideshowFfmpeg(ffmpegPath, imagePaths, audioPath, duration, outputPath, options = {}) {
+  const totalDuration = Math.max(Number(duration) || imagePaths.length * 3, imagePaths.length);
+  const imageDuration = totalDuration / imagePaths.length;
+  const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
+  for (const imagePath of imagePaths) {
+    args.push('-loop', '1', '-framerate', '30', '-t', imageDuration.toFixed(3), '-i', imagePath);
+  }
+  if (audioPath) args.push('-i', audioPath);
+
+  const filters = imagePaths.map((_, index) => (
+    `[${index}:v]scale=1080:1920:force_original_aspect_ratio=decrease,`
+    + 'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,'
+    + `setsar=1,fps=30,format=yuv420p,setpts=PTS-STARTPTS[v${index}]`
+  ));
+  filters.push(`${imagePaths.map((_, index) => `[v${index}]`).join('')}concat=n=${imagePaths.length}:v=1:a=0[vout]`);
+  args.push(
+    '-filter_complex', filters.join(';'),
+    '-map', '[vout]',
+  );
+  if (audioPath) {
+    args.push('-map', `${imagePaths.length}:a:0?`, '-c:a', 'aac', '-b:a', '192k', '-shortest');
+  } else {
+    args.push('-an', '-t', totalDuration.toFixed(3));
+  }
+  args.push(
+    '-c:v', 'libx264',
+    '-preset', 'medium',
+    '-crf', '20',
+    '-movflags', '+faststart',
+    outputPath,
+  );
+
+  await new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    const abort = () => {
+      proc.kill();
+      reject(new Error('任务已终止'));
+    };
+    if (options.signal?.aborted) return abort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    proc.stderr.on('data', (chunk) => {
+      stderr = `${stderr}${chunk}`.slice(-12_000);
+    });
+    proc.on('error', (error) => {
+      options.signal?.removeEventListener('abort', abort);
+      reject(error);
+    });
+    proc.on('exit', (code) => {
+      options.signal?.removeEventListener('abort', abort);
+      if (code === 0) resolve();
+      else reject(new Error(`FFmpeg 合成抖音图文视频失败（退出码 ${code}）：${stderr.trim()}`));
+    });
+  });
+}
+
+async function downloadPhotoNote(info, outputPath, pageUrl, cookies, options = {}) {
+  const ffmpegPath = await findFfmpeg(options.ffmpegPath);
+  if (!ffmpegPath) throw new Error('该抖音作品是图文相册，需要 FFmpeg 才能合成为视频。');
+  const tempDir = await makeTempDir(`douyin-photo-${info.id || 'note'}`);
+  const imagePaths = [];
+  let audioPath = '';
+  try {
+    reportLog(options, `  检测到抖音图文作品：${info.images.length} 张图片，正在合成为视频。`);
+    for (let index = 0; index < info.images.length; index += 1) {
+      const image = info.images[index];
+      const imagePath = path.join(tempDir, `image-${String(index + 1).padStart(2, '0')}.webp`);
+      const urls = [...new Set([image.src, ...(image.alternatives || [])].filter(Boolean))];
+      let lastError = null;
+      for (const src of urls) {
+        try {
+          await downloadToFile({ src, href: info.href || pageUrl }, imagePath, pageUrl, cookies, {
+            ...options,
+            onProgress: (payload) => {
+              const localPercent = Number(payload.percent) || 0;
+              reportProgress(options, {
+                ...payload,
+                percent: 5 + ((index + localPercent / 100) / info.images.length) * 55,
+              });
+            },
+          });
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (lastError) throw new Error(`第 ${index + 1} 张图片下载失败：${lastError.message}`);
+      imagePaths.push(imagePath);
+    }
+
+    if (info.audioSrc) {
+      audioPath = path.join(tempDir, 'background-audio.m4a');
+      await downloadToFile({ src: info.audioSrc, href: info.href || pageUrl }, audioPath, pageUrl, cookies, {
+        ...options,
+        onProgress: (payload) => reportProgress(options, {
+          ...payload,
+          percent: 60 + (Number(payload.percent) || 0) * 0.2,
+        }),
+      });
+    }
+
+    reportProgress(options, { percent: 82, outputPath });
+    reportLog(options, '  图片和背景音乐下载完成，正在生成相册视频...');
+    await runPhotoSlideshowFfmpeg(
+      ffmpegPath,
+      imagePaths,
+      audioPath,
+      info.duration,
+      outputPath,
+      options,
+    );
+    reportProgress(options, { percent: 94, outputPath });
+    const materialDir = path.dirname(outputPath);
+    for (let index = 0; index < imagePaths.length; index += 1) {
+      const imageName = `图片_${String(index + 1).padStart(2, '0')}.webp`;
+      await copyFile(imagePaths[index], path.join(materialDir, imageName));
+      reportProgress(options, {
+        percent: 94 + ((index + 1) / imagePaths.length) * 5,
+        outputPath,
+      });
+    }
+    reportLog(options, `  图文作品已整理到：${materialDir}`);
+    reportProgress(options, { percent: 100, outputPath });
+    return stat(outputPath);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function startBrowser(browserPath, port, profileDir, showBrowser, initialUrl = 'about:blank') {
   await mkdir(profileDir, { recursive: true });
   const args = [
     `--remote-debugging-port=${port}`,
@@ -810,7 +1367,7 @@ async function startBrowser(browserPath, port, profileDir, showBrowser) {
   if (!showBrowser) {
     args.push('--headless=new');
   }
-  args.push('about:blank');
+  args.push(initialUrl || 'about:blank');
 
   return spawn(browserPath, args, {
     stdio: 'ignore',
@@ -818,8 +1375,17 @@ async function startBrowser(browserPath, port, profileDir, showBrowser) {
   });
 }
 
-async function stopBrowser(proc) {
+async function stopBrowser(proc, page = null) {
   if (!proc || proc.killed) return;
+  if (page?.webSocketDebuggerUrl) {
+    await cdp(page.webSocketDebuggerUrl, 'Browser.close', {}, 1500).catch(() => {});
+  }
+  if (proc.exitCode !== null) return;
+  await Promise.race([
+    once(proc, 'exit'),
+    sleep(1500),
+  ]).catch(() => {});
+  if (proc.exitCode !== null) return;
   proc.kill();
   await Promise.race([
     once(proc, 'exit'),
@@ -829,24 +1395,43 @@ async function stopBrowser(proc) {
 
 async function createDouyinSession(browserPath, options = {}) {
   const port = await getFreePort();
-  const profileDir = await makeTempDir('douyin-downloader-batch');
-  const proc = await startBrowser(browserPath, port, profileDir, true);
-  const page = await waitForPage(port, options.timeoutMs || DEFAULT_TIMEOUT_MS);
-  await cdp(page.webSocketDebuggerUrl, 'Page.addScriptToEvaluateOnNewDocument', {
-    source: DOUYIN_MEDIA_PROBE_SCRIPT,
-  });
-  return {
-    proc,
+  const temporaryProfile = !options.profileDir;
+  const profileDir = options.profileDir
+    ? path.resolve(options.profileDir)
+    : await makeTempDir('douyin-downloader-batch');
+  const proc = await startBrowser(
+    browserPath,
     port,
     profileDir,
-    page,
-  };
+    true,
+    options.initialUrl || 'https://www.douyin.com/',
+  );
+  let page = null;
+  try {
+    page = await waitForPage(port, options.timeoutMs || DEFAULT_TIMEOUT_MS);
+    await cdp(page.webSocketDebuggerUrl, 'Page.addScriptToEvaluateOnNewDocument', {
+      source: DOUYIN_MEDIA_PROBE_SCRIPT,
+    });
+    return {
+      proc,
+      port,
+      profileDir,
+      page,
+      temporaryProfile,
+    };
+  } catch (error) {
+    await stopBrowser(proc, page).catch(() => {});
+    if (temporaryProfile) {
+      await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+    }
+    throw error;
+  }
 }
 
 async function closeDouyinSession(session, options = {}) {
   if (!session) return;
-  await stopBrowser(session.proc);
-  if (!options.keepProfile && session.profileDir) {
+  await stopBrowser(session.proc, session.page);
+  if (session.temporaryProfile && !options.keepProfile && session.profileDir) {
     await rm(session.profileDir, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -945,6 +1530,9 @@ function logDouyinInfo(info, options = {}) {
   if (info.source) {
     reportLog(options, `  Source type: ${info.source}`);
   }
+  if (isPhotoNoteInfo(info)) {
+    reportLog(options, `  Photo note: ${info.images.length} images${info.audioSrc ? ' + background audio' : ''}`);
+  }
   if (info.availableQualities?.length) {
     const qualities = info.availableQualities
       .map((item) => item.dimension ? `${item.dimension}P` : '')
@@ -961,31 +1549,58 @@ function logDouyinInfo(info, options = {}) {
 }
 
 async function downloadOne(url, options, browserPath) {
-  if (options.douyinResolvedInfo?.info?.src) {
-    const { cookies = [], pageUrl = normalizeDouyinUrl(url) } = options.douyinResolvedInfo;
+  if (options.douyinResolvedInfo?.info?.src || isPhotoNoteInfo(options.douyinResolvedInfo?.info)) {
+    const { cookies = [], pageUrl: cachedPageUrl = '' } = options.douyinResolvedInfo;
+    const pageUrl = await resolveDouyinUrl(cachedPageUrl || url, Math.min(options.timeoutMs, 15_000));
     const info = selectCachedDouyinInfo(options.douyinResolvedInfo, options.quality);
     reportLog(options, `Opening: ${url}`);
     reportLog(options, '  使用识别画质时锁定的抖音播放源。');
     logDouyinInfo(info, options);
 
     if (options.infoOnly) {
-      reportLog(options, `  Source: ${info.src}`);
+      reportLog(options, isPhotoNoteInfo(info) ? `  Images: ${info.images.length}` : `  Source: ${info.src}`);
       return options.douyinResolvedInfo;
     }
 
     await mkdir(path.resolve(options.outDir), { recursive: true });
-    const outputPath = await buildOutputPath(options.outDir, options.nameTemplate, info, options.overwrite);
+    const outputPath = isPhotoNoteInfo(info)
+      ? await buildPhotoOutputPath(options.outDir, options.nameTemplate, info, options.overwrite)
+      : await buildOutputPath(options.outDir, options.nameTemplate, info, options.overwrite);
     reportLog(options, `  Saving: ${outputPath}`);
-    const saved = await downloadToFile(info, outputPath, pageUrl, cookies, options);
-    reportLog(options, `  Done: ${saved.size} bytes`);
-    return outputPath;
+    try {
+      const saved = isPhotoNoteInfo(info)
+        ? await downloadPhotoNote(info, outputPath, pageUrl, cookies, options)
+        : await downloadToFile(info, outputPath, pageUrl, cookies, options);
+      reportLog(options, `  Done: ${saved.size} bytes`);
+      return outputPath;
+    } catch (error) {
+      if (options.signal?.aborted || /任务已终止|aborted|abort/i.test(String(error?.message || error))) {
+        throw error;
+      }
+      if (isPhotoNoteInfo(info)) {
+        await rm(path.dirname(outputPath), { recursive: true, force: true }).catch(() => {});
+      } else {
+        await rm(outputPath, { force: true }).catch(() => {});
+      }
+      reportLog(options, '  识别阶段锁定的抖音媒体地址已失效，正在自动重新解析后继续下载。');
+      return downloadOne(pageUrl, {
+        ...options,
+        douyinResolvedInfo: null,
+        downloadAttempts: Math.max(3, Number(options.downloadAttempts) || 0),
+      }, browserPath);
+    }
   }
 
-  const pageUrl = normalizeDouyinUrl(url);
+  const pageUrl = await resolveDouyinUrl(url, Math.min(options.timeoutMs, 15_000));
   const expectedId = extractDouyinId(pageUrl);
   const session = options.douyinSession || null;
   const port = session ? session.port : await getFreePort();
-  const profileDir = session ? session.profileDir : await makeTempDir('douyin-downloader');
+  const temporaryProfile = !session && !options.douyinProfileDir;
+  const profileDir = session
+    ? session.profileDir
+    : options.douyinProfileDir
+      ? path.resolve(options.douyinProfileDir)
+      : await makeTempDir('douyin-downloader');
   let proc = null;
   let page = session?.page || null;
 
@@ -1005,14 +1620,13 @@ async function downloadOne(url, options, browserPath) {
     }
     await resetDouyinPageForSwitch(page);
     await cdp(page.webSocketDebuggerUrl, 'Page.navigate', { url: pageUrl });
-    const info = await getAwemeDetailInfo(page, options.timeoutMs, options.quality, expectedId)
-      .catch(() => getVideoInfo(page, options.timeoutMs, expectedId));
+    const info = await resolveDouyinVideoInfo(page, options.timeoutMs, options.quality, expectedId);
     const cookieResult = await cdp(page.webSocketDebuggerUrl, 'Network.getAllCookies').catch(() => ({ cookies: [] }));
 
     logDouyinInfo(info, options);
 
     if (options.infoOnly) {
-      reportLog(options, `  Source: ${info.src}`);
+      reportLog(options, isPhotoNoteInfo(info) ? `  Images: ${info.images.length}` : `  Source: ${info.src}`);
       return {
         platform: 'douyin',
         info,
@@ -1023,17 +1637,21 @@ async function downloadOne(url, options, browserPath) {
     }
 
     await mkdir(path.resolve(options.outDir), { recursive: true });
-    const outputPath = await buildOutputPath(options.outDir, options.nameTemplate, info, options.overwrite);
+    const outputPath = isPhotoNoteInfo(info)
+      ? await buildPhotoOutputPath(options.outDir, options.nameTemplate, info, options.overwrite)
+      : await buildOutputPath(options.outDir, options.nameTemplate, info, options.overwrite);
     reportLog(options, `  Saving: ${outputPath}`);
-    const saved = await downloadToFile(info, outputPath, pageUrl, cookieResult.cookies || [], options);
+    const saved = isPhotoNoteInfo(info)
+      ? await downloadPhotoNote(info, outputPath, pageUrl, cookieResult.cookies || [], options)
+      : await downloadToFile(info, outputPath, pageUrl, cookieResult.cookies || [], options);
     reportLog(options, `  Done: ${saved.size} bytes`);
     return outputPath;
   } finally {
     if (!session) {
-      await stopBrowser(proc);
-      if (!options.keepProfile) {
+      await stopBrowser(proc, page);
+      if (temporaryProfile && !options.keepProfile) {
         await rm(profileDir, { recursive: true, force: true }).catch(() => {});
-      } else {
+      } else if (temporaryProfile) {
         reportLog(options, `  Kept browser profile: ${profileDir}`);
       }
     }
@@ -1042,8 +1660,9 @@ async function downloadOne(url, options, browserPath) {
 
 
 function supportsDouyinUrl(url) {
+  const candidate = extractDouyinUrls(url)[0] || String(url || '').trim();
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(candidate);
     return parsed.hostname === 'douyin.com' || parsed.hostname.endsWith('.douyin.com');
   } catch {
     return false;
@@ -1057,4 +1676,4 @@ const platform = {
   downloadOne,
 };
 
-export { closeDouyinSession, createDouyinSession, downloadOne, findBrowser, normalizeDouyinUrl, platform };
+export { closeDouyinSession, createDouyinSession, downloadOne, extractDouyinUrls, findBrowser, normalizeDouyinUrl, platform, resolveDouyinUrl };

@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
-import { access, mkdir, readdir, stat, unlink } from 'node:fs/promises';
+import { access, mkdir, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { findJavaScriptRuntime } from '../../core/runtime-tools.mjs';
+import { makeTempDir } from '../../core/temp-dir.mjs';
 import { fileURLToPath } from 'node:url';
 import { findFfmpeg } from '../bilibili/index.mjs';
 
@@ -407,7 +408,7 @@ async function hasAudioStream(filePath, ffmpegPath = '') {
   }
 }
 
-async function runYtDlpDownload(ytDlpPath, commonArgs, format, outputPath, url, ffmpegPath, options = {}) {
+async function runYtDlpDownload(ytDlpPath, commonArgs, format, outputPath, url, ffmpegPath, options = {}, rawInfo = null) {
   const args = [
     ...commonArgs,
     '--no-playlist',
@@ -420,8 +421,20 @@ async function runYtDlpDownload(ytDlpPath, commonArgs, format, outputPath, url, 
   if (ffmpegPath) {
     args.push('--ffmpeg-location', ffmpegPath);
   }
-  args.push(url);
-  await runStreaming(ytDlpPath, args, options);
+  let tempDir = '';
+  try {
+    if (rawInfo) {
+      tempDir = await makeTempDir('yt-dlp-resolved-info');
+      const infoPath = path.join(tempDir, 'info.json');
+      await writeFile(infoPath, JSON.stringify(rawInfo), 'utf8');
+      args.push('--load-info-json', infoPath);
+    } else {
+      args.push(url);
+    }
+    await runStreaming(ytDlpPath, args, options);
+  } finally {
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function videoQualitySide(format) {
@@ -561,7 +574,7 @@ function explainYtDlpError(error, platformName, options = {}) {
   return error;
 }
 
-async function getYtDlpVideoInfo(url, options = {}, platformName = 'YouTube') {
+async function getYtDlpRawInfo(url, options = {}, platformName = 'YouTube', settings = {}) {
   const ytDlpPath = await findYtDlp(options.ytDlpPath);
   if (!ytDlpPath) {
     throw new Error(`没有找到 yt-dlp。请把 yt-dlp.exe 放到程序目录或 downloads 文件夹，也可以在 ${platformName} 设置里手动填写路径。`);
@@ -573,7 +586,8 @@ async function getYtDlpVideoInfo(url, options = {}, platformName = 'YouTube') {
     ({ stdout } = await runCollect(ytDlpPath, [
       ...commonArgs,
       '--dump-single-json',
-      '--no-playlist',
+      ...(settings.allowPlaylist ? [] : ['--no-playlist']),
+      ...(settings.ignoreNoFormats ? ['--ignore-no-formats-error'] : []),
       '--no-warnings',
       '--skip-download',
       ...buildYtDlpAuthArgs(options),
@@ -582,7 +596,11 @@ async function getYtDlpVideoInfo(url, options = {}, platformName = 'YouTube') {
   } catch (error) {
     throw explainYtDlpError(error, platformName, options);
   }
-  const info = JSON.parse(stdout);
+  return { ytDlpPath, info: JSON.parse(stdout) };
+}
+
+async function getYtDlpVideoInfo(url, options = {}, platformName = 'YouTube') {
+  const { ytDlpPath, info } = await getYtDlpRawInfo(url, options, platformName);
   return {
     ytDlpPath,
     id: info.id || 'youtube',
@@ -592,16 +610,24 @@ async function getYtDlpVideoInfo(url, options = {}, platformName = 'YouTube') {
     webpageUrl: info.webpage_url || url,
     formats: info.formats || [],
     availableQualities: describeFormats(info),
+    rawInfo: info,
   };
 }
 
 async function downloadWithYtDlp(url, options = {}, platformName = 'YouTube', platformSlug = 'youtube') {
   reportLog(options, `Opening: ${url}`);
-  const info = await getYtDlpVideoInfo(url, options, platformName);
+  const cachedInfo = options.ytDlpResolvedInfo?.info?.rawInfo
+    ? options.ytDlpResolvedInfo.info
+    : null;
+  let info = cachedInfo || await getYtDlpVideoInfo(url, options, platformName);
   const ffmpegPath = await findFfmpeg(options.ffmpegPath);
   const hasFfmpeg = Boolean(ffmpegPath);
   const outputPath = await buildOutputPath(options.outDir, options.nameTemplate, info, options.overwrite, platformSlug);
-  const format = formatSelector(options.quality, hasFfmpeg, info, platformSlug);
+  let format = formatSelector(options.quality, hasFfmpeg, info, platformSlug);
+
+  if (cachedInfo) {
+    reportLog(options, `  使用识别画质时锁定的 ${platformName} 媒体信息，不再重新解析网页。`);
+  }
 
   reportLog(options, `  Title: ${info.title || '(no title)'}`);
   reportLog(options, `  ID: ${info.id}`);
@@ -619,14 +645,29 @@ async function downloadWithYtDlp(url, options = {}, platformName = 'YouTube', pl
 
   if (options.infoOnly) {
     reportLog(options, `  Source: ${info.webpageUrl}`);
-    return null;
+    return {
+      platform: platformSlug,
+      info,
+      pageUrl: url,
+      capturedAt: Date.now(),
+    };
   }
 
   await mkdir(path.resolve(options.outDir), { recursive: true });
   reportLog(options, `  Saving: ${outputPath}`);
   const commonArgs = await buildYtDlpCommonArgs();
   try {
-    await runYtDlpDownload(info.ytDlpPath, commonArgs, format, outputPath, url, ffmpegPath, options);
+    try {
+      await runYtDlpDownload(info.ytDlpPath, commonArgs, format, outputPath, url, ffmpegPath, options, info.rawInfo || null);
+    } catch (error) {
+      if (!cachedInfo || options.signal?.aborted) throw error;
+      reportLog(options, `  识别阶段锁定的 ${platformName} 媒体地址已失效，正在重新解析后继续下载。`);
+      await unlink(outputPath).catch(() => {});
+      info = await getYtDlpVideoInfo(url, options, platformName);
+      format = formatSelector(options.quality, hasFfmpeg, info, platformSlug);
+      reportLog(options, `  Refreshed format: ${format}`);
+      await runYtDlpDownload(info.ytDlpPath, commonArgs, format, outputPath, url, ffmpegPath, options);
+    }
     if (platformSlug === 'tiktok' || platformSlug === 'instagram') {
       const audio = await hasAudioStream(outputPath, ffmpegPath);
       const platformLabel = platformSlug === 'instagram' ? 'Instagram' : 'TikTok';
@@ -637,7 +678,7 @@ async function downloadWithYtDlp(url, options = {}, platformName = 'YouTube', pl
         reportLog(options, `  ${platformLabel} 音轨检测：当前文件没有音频，正在换用备用格式重新下载...`);
         await unlink(outputPath).catch(() => {});
         reportLog(options, `  Retry format: ${retryFormat}`);
-        await runYtDlpDownload(info.ytDlpPath, commonArgs, retryFormat, outputPath, url, ffmpegPath, options);
+        await runYtDlpDownload(info.ytDlpPath, commonArgs, retryFormat, outputPath, url, ffmpegPath, options, info.rawInfo || null);
         const retryAudio = await hasAudioStream(outputPath, ffmpegPath);
         if (retryAudio === false) {
           throw new Error(`${platformLabel} 下载完成但文件仍然没有音轨。可能该链接的可用格式本身不含音频，或平台返回了异常视频流。`);
@@ -675,4 +716,4 @@ const platform = {
   downloadOne,
 };
 
-export { downloadOne, downloadWithYtDlp, findYtDlp, getVideoInfo, getYtDlpVideoInfo, platform };
+export { downloadOne, downloadWithYtDlp, findYtDlp, getVideoInfo, getYtDlpRawInfo, getYtDlpVideoInfo, platform };

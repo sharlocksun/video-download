@@ -94,9 +94,13 @@ function resolveWhisperRoot(whisperPath) {
   const raw = String(whisperPath || '').trim() || path.join(resolveComponentsDir(), 'whisper');
   const resolved = path.resolve(raw);
   const baseName = path.basename(resolved).toLowerCase();
-  if (['python.exe', 'python', 'python3', 'whisper.exe', 'whisper'].includes(baseName)) {
+  if (['python.exe', 'pythonw.exe', 'whisper.exe'].includes(baseName)) {
     const parent = path.dirname(resolved);
     return path.basename(parent).toLowerCase() === 'scripts' ? path.dirname(parent) : parent;
+  }
+  if (['python', 'python3', 'whisper'].includes(baseName)) {
+    const parent = path.dirname(resolved);
+    if (path.basename(parent).toLowerCase() === 'bin') return path.dirname(parent);
   }
   return resolved;
 }
@@ -393,6 +397,88 @@ async function resolveWhisperCpp(options = {}) {
   return null;
 }
 
+async function diagnoseWhisperSelection(options = {}) {
+  const configuredPath = String(options.whisperPath || '').trim();
+  const engine = String(options.engine || 'auto');
+  const model = String(options.model || 'small').replace(/\.pt$/i, '');
+  let pythonError = null;
+
+  if (configuredPath && (engine === 'auto' || engine === 'python')) {
+    try {
+      const whisper = await resolveWhisperCommand(configuredPath);
+      const device = await detectWhisperDevice(whisper, configuredPath);
+      const modelPath = path.join(resolveWhisperRoot(configuredPath), 'models', `${model}.pt`);
+      const modelInstalled = await exists(modelPath);
+      return {
+        configured: true,
+        engineAvailable: true,
+        modelInstalled,
+        kind: 'python',
+        path: configuredPath,
+        command: whisper.command,
+        model,
+        modelPath,
+        device: device.device,
+        gpuName: device.name || '',
+        error: modelInstalled ? '' : `没有找到模型文件：${modelPath}`,
+      };
+    } catch (error) {
+      pythonError = error;
+      if (engine === 'python') {
+        return {
+          configured: true,
+          engineAvailable: false,
+          modelInstalled: false,
+          kind: 'python',
+          path: configuredPath,
+          model,
+          error: error.message,
+        };
+      }
+    }
+  }
+
+  const forceBackend = engine === 'whisper-cpp-cpu'
+    ? 'cpu'
+    : engine === 'whisper-cpp-vulkan'
+      ? 'vulkan'
+      : 'auto';
+  const cpp = await resolveWhisperCpp({
+    whisperPath: configuredPath,
+    engine,
+    forceBackend,
+  });
+  if (cpp) {
+    const modelPath = (await Promise.all(
+      whisperCppModelPath({ model }, cpp.root).map(async (item) => await exists(item) ? item : ''),
+    )).find(Boolean) || whisperCppModelPath({ model }, cpp.root)[0];
+    const modelInstalled = await exists(modelPath);
+    return {
+      configured: Boolean(configuredPath),
+      engineAvailable: true,
+      modelInstalled,
+      kind: 'whisper-cpp',
+      path: cpp.root,
+      command: cpp.command,
+      model,
+      modelPath,
+      device: cpp.backend,
+      gpuName: '',
+      error: modelInstalled ? '' : `没有找到模型文件：${modelPath}`,
+    };
+  }
+
+  return {
+    configured: Boolean(configuredPath),
+    engineAvailable: false,
+    modelInstalled: false,
+    kind: engine === 'python' ? 'python' : 'none',
+    path: configuredPath,
+    model,
+    error: pythonError?.message || '没有找到可用的本地 Whisper 转写引擎。',
+  };
+}
+
 function whisperCppModelPath(options = {}, root = '') {
   const model = String(options.model || 'small').replace(/^ggml-/, '').replace(/\.bin$/i, '');
   const candidates = [
@@ -516,6 +602,7 @@ async function transcribeWithWhisper(filePath, ffmpegPath, options = {}) {
 }
 
 export {
+  diagnoseWhisperSelection,
   transcribeLocalMedia,
   transcribeWithWhisper,
   transcribeWithWhisperCpp,
