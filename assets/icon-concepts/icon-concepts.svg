@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="660" viewBox="0 0 960 660">
+  <defs>
+    <linearGradient id="burgundy" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#a8453d"/><stop offset="1" stop-color="#70231f"/></linearGradient>
+    <linearGradient id="charcoal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#404944"/><stop offset="1" stop-color="#202722"/></linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3f7778"/><stop offset="1" stop-color="#214f52"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#263028" flood-opacity=".16"/></filter>
+  </defs>
+  <rect width="960" height="660" fill="#f2f4f1"/>
+  <text x="48" y="49" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="25" font-weight="700" fill="#252b27">木辛说视频下载器 · 快捷方式图标方向</text>
+  <text x="48" y="78" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="14" fill="#6a746d">均按小尺寸识别设计，不使用 Node.js 默认六边形</text>
+
+  <!-- 1 -->
+  <g transform="translate(70 112)">
+    <rect width="240" height="225" rx="16" fill="#fff" stroke="#dfe3de" filter="url(#shadow)"/>
+    <rect x="56" y="27" width="128" height="128" rx="29" fill="url(#burgundy)"/>
+    <path d="M103 62 L145 91 L103 120 Z" fill="#fff7ef"/>
+    <path d="M120 107 V137 M103 123 L120 140 L137 123" fill="none" stroke="#f0c36d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="120" y="188" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="16" font-weight="700" fill="#2e3430">1  播放下载</text>
+    <text x="120" y="211" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="12" fill="#788078">直接、醒目、工具感强</text>
+  </g>
+
+  <!-- 2 -->
+  <g transform="translate(360 112)">
+    <rect width="240" height="225" rx="16" fill="#fff" stroke="#dfe3de" filter="url(#shadow)"/>
+    <circle cx="120" cy="91" r="64" fill="url(#charcoal)"/>
+    <path d="M120 44 C90 51 73 75 78 106 C99 104 115 92 120 72 Z" fill="#b88a47"/>
+    <path d="M120 44 C150 51 167 75 162 106 C141 104 125 92 120 72 Z" fill="#d2b06d"/>
+    <path d="M108 79 L142 101 L108 123 Z" fill="#fff"/>
+    <text x="120" y="188" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="16" font-weight="700" fill="#2e3430">2  木叶播放</text>
+    <text x="120" y="211" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="12" fill="#788078">品牌感更强、沉稳</text>
+  </g>
+
+  <!-- 3 -->
+  <g transform="translate(650 112)">
+    <rect width="240" height="225" rx="16" fill="#fff" stroke="#dfe3de" filter="url(#shadow)"/>
+    <rect x="56" y="27" width="128" height="128" rx="29" fill="#f7f1e7" stroke="#d9c9b3" stroke-width="3"/>
+    <path d="M79 120 V66 L102 91 L120 65 L138 91 L161 66 V120" fill="none" stroke="#8f352f" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M113 86 L139 102 L113 118 Z" fill="#c3974d"/>
+    <text x="120" y="188" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="16" font-weight="700" fill="#2e3430">3  木字胶片</text>
+    <text x="120" y="211" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="12" fill="#788078">更独特、适合长期品牌化</text>
+  </g>
+
+  <!-- 4 -->
+  <g transform="translate(70 383)">
+    <rect width="240" height="225" rx="16" fill="#fff" stroke="#dfe3de" filter="url(#shadow)"/>
+    <rect x="56" y="27" width="128" height="128" rx="32" fill="url(#teal)"/>
+    <path d="M78 61 H162 V117 H125 L104 137 V117 H78 Z" fill="#fff"/>
+    <path d="M101 75 L132 91 L101 107 Z" fill="#8e342e"/>
+    <path d="M139 76 H151 M139 88 H153 M139 100 H149" stroke="#d6aa59" stroke-width="5" stroke-linecap="round"/>
+    <text x="120" y="188" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="16" font-weight="700" fill="#2e3430">4  视频字幕</text>
+    <text x="120" y="211" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="12" fill="#788078">突出字幕与内容分析</text>
+  </g>
+
+  <!-- 5 -->
+  <g transform="translate(360 383)">
+    <rect width="240" height="225" rx="16" fill="#fff" stroke="#dfe3de" filter="url(#shadow)"/>
+    <path d="M120 27 C157 27 181 49 181 86 V129 C162 148 142 157 120 162 C98 157 78 148 59 129 V86 C59 49 83 27 120 27 Z" fill="url(#burgundy)"/>
+    <rect x="84" y="62" width="72" height="55" rx="10" fill="#fff8ee"/>
+    <path d="M111 75 L137 90 L111 105 Z" fill="#7d2c28"/>
+    <path d="M120 109 V136 M106 123 L120 137 L134 123" fill="none" stroke="#e2b65d" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="120" y="188" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="16" font-weight="700" fill="#2e3430">5  下载徽章</text>
+    <text x="120" y="211" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="12" fill="#788078">可靠、像正式桌面软件</text>
+  </g>
+
+  <!-- 6 -->
+  <g transform="translate(650 383)">
+    <rect width="240" height="225" rx="16" fill="#fff" stroke="#dfe3de" filter="url(#shadow)"/>
+    <rect x="56" y="27" width="128" height="128" rx="30" fill="#292f2b"/>
+    <path d="M79 55 H161 V126 H79 Z" fill="none" stroke="#c99b4d" stroke-width="8"/>
+    <path d="M120 55 V126 M79 90 H161" stroke="#c99b4d" stroke-width="7"/>
+    <path d="M98 67 L139 90 L98 113 Z" fill="#a53d35"/>
+    <circle cx="152" cy="133" r="17" fill="#f5eee1"/>
+    <path d="M152 124 V140 M145 133 L152 140 L159 133" fill="none" stroke="#8e342e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="120" y="188" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="16" font-weight="700" fill="#2e3430">6  木窗影像</text>
+    <text x="120" y="211" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="12" fill="#788078">东方感、辨识度最高</text>
+  </g>
+</svg>
